@@ -1,28 +1,43 @@
+# .github/workflows/deploy.yml
 name: Deploy Odoo (Prod & Staging)
+
 on:
   push:
-    branches: ["main", "staging"]
-  workflow_dispatch: {}
-permissions:
-  contents: read
-concurrency:
-  group: deploy-${{ github.ref }}
-  cancel-in-progress: true
+    branches: ["staging","main"]
+  workflow_dispatch:
+
 jobs:
   deploy-staging:
-    if: github.ref == 'refs/heads/staging'
+    if: github.ref == 'refs/heads/staging' || github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, staging]
+    environment: staging
     steps:
       - uses: actions/checkout@v4
+
+      - name: Rehydrate .env.staging
+        run: |
+          echo "${{ secrets.ENV_STAGING_B64 }}" | base64 -d > .env.staging
+          chmod 600 .env.staging
+          ls -la .env.*   # debug; remove later
+
       - name: Deploy Staging
         run: |
           chmod +x scripts/deploy.sh
           ./scripts/deploy.sh staging
+
   deploy-prod:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, production]
+    environment: production
     steps:
       - uses: actions/checkout@v4
+
+      - name: Rehydrate .env.prod
+        run: |
+          echo "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
+          chmod 600 .env.prod
+          ls -la .env.*   # debug; remove later
+
       - name: Deploy Production
         run: |
           chmod +x scripts/deploy.sh

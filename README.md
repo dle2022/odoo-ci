@@ -8,3 +8,4 @@ This repo gives you an Odoo.sh-like workflow on-prem using:
 - Nginx reverse proxy + TLS (Let's Encrypt)
 
 See scripts in `scripts/` and `backup/`, Compose files in `compose/`.
+CI test Fri Sep 19 01:58:20 AM UTC 2025

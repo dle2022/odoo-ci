@@ -1,0 +1,29 @@
+name: Deploy Odoo (Prod & Staging)
+on:
+  push:
+    branches: ["main", "staging"]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  deploy-staging:
+    if: github.ref == 'refs/heads/staging'
+    runs-on: [self-hosted, odoo-ci]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy Staging
+        run: |
+          chmod +x scripts/deploy.sh
+          ./scripts/deploy.sh staging
+  deploy-prod:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, odoo-ci]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy Production
+        run: |
+          chmod +x scripts/deploy.sh
+          ./scripts/deploy.sh prod

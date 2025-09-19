@@ -1,0 +1,14 @@
+name: Clone Prod → Staging
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  clone-refresh:
+    runs-on: [self-hosted, odoo-ci]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refresh Staging from Production
+        run: |
+          chmod +x scripts/clone_prod_to_staging.sh
+          ./scripts/clone_prod_to_staging.sh

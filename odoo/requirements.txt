@@ -1,0 +1,4 @@
+# Add Python packages your custom addons need, e.g.:
+# psycopg2-binary==2.9.9
+# num2words==0.5.13
+# Babel==2.15.0

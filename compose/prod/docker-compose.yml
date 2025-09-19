@@ -1,0 +1,43 @@
+version: "3.9"
+services:
+  db:
+    image: postgres:15
+    container_name: odoo-prod-db
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - prod_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  odoo:
+    image: odoo:${ODOO_VERSION}
+    # build:
+    #   context: ../../odoo
+    #   dockerfile: Dockerfile
+    container_name: odoo-prod-app
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - ../../.env.prod
+    environment:
+      HOST: db
+      USER: ${POSTGRES_USER}
+      PASSWORD: ${POSTGRES_PASSWORD}
+      WORKERS: ${WORKERS}
+    volumes:
+      - ../../odoo/addons:/mnt/extra-addons
+      - ../../odoo/config/odoo.prod.conf:/etc/odoo/odoo.conf:ro
+      - prod_odoo_data:/var/lib/odoo
+    ports:
+      - "8070:8069"
+
+volumes:
+  prod_db_data:
+  prod_odoo_data:

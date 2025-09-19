@@ -1,0 +1,13 @@
+[options]
+; Rendered by scripts/deploy.sh using envsubst
+admin_passwd = ${ADMIN_PASSWORD}
+db_host = db
+db_port = 5432
+db_user = ${POSTGRES_USER}
+db_password = ${POSTGRES_PASSWORD}
+dbfilter = ^${DB_NAME}$
+logfile = /var/log/odoo/odoo.log
+addons_path = /usr/lib/python3/dist-packages/odoo/addons,/mnt/extra-addons
+limit_time_cpu = 600
+limit_time_real = 1200
+proxy_mode = True

@@ -1,0 +1,20 @@
+name: Runner Smoke Test
+on:
+  workflow_dispatch:
+
+jobs:
+  ping-staging:
+    runs-on: [self-hosted, staging]
+    steps:
+      - run: |
+          echo "STAGING runner: $(hostname)"
+          whoami
+          uname -a
+
+  ping-prod:
+    runs-on: [self-hosted, production]
+    steps:
+      - run: |
+          echo "PROD runner: $(hostname)"
+          whoami
+          uname -a

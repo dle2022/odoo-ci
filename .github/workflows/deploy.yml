@@ -11,7 +11,7 @@ concurrency:
 jobs:
   deploy-staging:
     if: github.ref == 'refs/heads/staging'
-    runs-on: [self-hosted, odoo-ci]
+    runs-on: [self-hosted, staging]
     steps:
       - uses: actions/checkout@v4
       - name: Deploy Staging
@@ -20,7 +20,7 @@ jobs:
           ./scripts/deploy.sh staging
   deploy-prod:
     if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, odoo-ci]
+    runs-on: [self-hosted, production]
     steps:
       - uses: actions/checkout@v4
       - name: Deploy Production

@@ -74,6 +74,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Rehydrate prod backup env
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${{ secrets.ENV_PROD_B64 }}" ]] || { echo "ENV_PROD_B64 empty"; exit 90; }
+          printf '%s' "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.backup.prod
+          sed -i 's/\r$//' .env.backup.prod || true
 
       # Rehydrate BOTH envs on the staging runner if your clone script reads them locally
       - name: Rehydrate staging env

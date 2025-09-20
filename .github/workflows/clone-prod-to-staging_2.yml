@@ -25,8 +25,9 @@ jobs:
   make_prod_backup:
     name: Make/Select Prod Backup
     runs-on: [self-hosted, production]
-    outputs:
-      backup_path: ${{ steps.pick.outputs.path }}
+    environment: production
+   # outputs:
+    #  backup_path: ${{ steps.pick.outputs.path }}
     #  artifact_name: ${{ steps.artname.outputs.name }}
     steps:
       - uses: actions/checkout@v4

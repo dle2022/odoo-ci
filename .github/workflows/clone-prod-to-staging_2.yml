@@ -107,23 +107,23 @@ jobs:
 
       # Rehydrate BOTH envs on the staging runner (script reads prod+staging envs locally)
             # --------- ARTIFACT path (for cross-host) ---------
-     - name: Download backup artifact (cross-host)
-       if: ${{ inputs.transfer == 'artifact' }}
-       uses: actions/download-artifact@v4
-       with:
-         name: ${{ github.run_id }}-prod-backup
-         path: ${{ runner.temp }}/backup
+      - name: Download backup artifact (cross-host)
+        if: ${{ inputs.transfer == 'artifact' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.run_id }}-prod-backup
+          path: ${{ runner.temp }}/backup
 
-     - name: Set restore path (artifact)
-       if: ${{ inputs.transfer == 'artifact' }}
-       id: setpath
-       shell: bash
-       run: |
-         set -euo pipefail
-         P="$(ls -1 "${{ runner.temp }}/backup/"*.tar.gz | head -1 || true)"
-         [[ -n "$P" && -f "$P" ]] || { echo "Artifact tar.gz not found"; exit 12; }
-         echo "path=$P" >> "$GITHUB_OUTPUT"
-         echo "Using artifact: $P"
+      - name: Set restore path (artifact)
+        if: ${{ inputs.transfer == 'artifact' }}
+        id: setpath
+        shell: bash
+        run: |
+          set -euo pipefail
+          P="$(ls -1 "${{ runner.temp }}/backup/"*.tar.gz | head -1 || true)"
+          [[ -n "$P" && -f "$P" ]] || { echo "Artifact tar.gz not found"; exit 12; }
+          echo "path=$P" >> "$GITHUB_OUTPUT"
+          echo "Using artifact: $P"
 
 
 

@@ -8,16 +8,28 @@ set -euo pipefail
 ENV="${1:?Usage: backup_docker.sh <prod|staging>}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${ROOT}/.env.${ENV}"
-[[ -f "$ENV_FILE" ]] || { echo "Missing $ENV_FILE"; exit 2; }
+# Prefer split backup env if present; otherwise fall back to deploy env
+BACKUP_ENV_CANDIDATE="${ROOT}/.env.backup.${ENV}"
+DEPLOY_ENV_CANDIDATE="${ROOT}/.env.${ENV}"
+if [[ -f "$BACKUP_ENV_CANDIDATE" ]]; then
+  ENV_FILE="$BACKUP_ENV_CANDIDATE"
+elif [[ -f "$DEPLOY_ENV_CANDIDATE" ]]; then
+  ENV_FILE="$DEPLOY_ENV_CANDIDATE"
+else
+  echo "ERROR: Missing env file. Looked for:"
+  echo "  $BACKUP_ENV_CANDIDATE"
+  echo "  $DEPLOY_ENV_CANDIDATE"
+  exit 2
+fi
 
-# Load env (allow indirect refs like ${POSTGRES_USER})
-#set -a; source "$ENV_FILE"; set +a
+# --- Source with CRLF protection (strip \r at end of lines) ---
+set -a
+# shellcheck disable=SC1090
+source <(sed -e 's/\r$//' "$ENV_FILE")
+set +a
 
-set -a; source "$ENV_FILE"; set +a
-echo "DBG: using $ENV_FILE"
-echo "DBG: POSTGRES_USER='${POSTGRES_USER:-<unset>}' DB_USER(before normalize)='${DB_USER:-<unset>}' DB_NAME='${DB_NAME:-<unset>}'"
-
+echo "DBG: using ENV_FILE=$ENV_FILE"
+echo "DBG: POSTGRES_USER='${POSTGRES_USER:-<unset>}' DB_USER(before)='${DB_USER:-<unset>}' DB_NAME='${DB_NAME:-<unset>}'"
 
 # Defaults / normalization
 BACKUP_ROOT="${BACKUP_ROOT:-$HOME/github-runner/backups}"

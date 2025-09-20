@@ -1,0 +1,58 @@
+name: Backup Odoo
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which environment to back up"
+        type: choice
+        options: [staging, production]
+        default: production
+  schedule:
+    - cron: "0 9 * * *"   # 09:00 UTC daily (prod)
+
+jobs:
+  backup:
+    # Decide which runner to use (handles both manual & cron)
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && inputs.target == 'staging')
+                  && fromJSON('["self-hosted","staging"]')
+                  || fromJSON('["self-hosted","production"]') }}
+
+    # Attach the correct GitHub Environment so you can scope secrets/approvals
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.target || 'production' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Rehydrate the correct .env file into the job workspace.
+      # (scripts/backup_docker.sh reads .env.staging or .env.prod from repo root)
+      - name: Rehydrate env file
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.target }}" == "staging" ]]; then
+            echo "${{ secrets.ENV_STAGING_B64 }}" | base64 -d > .env.staging
+          else
+            echo "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
+          fi
+          ls -la .env.*  # debug; safe to remove later
+
+      - name: Run backup
+        id: dobackup
+        run: |
+          chmod +x scripts/backup_docker.sh
+          # Map environment name for the script: prod|staging
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.target }}" == "staging" ]]; then
+            SHORT=staging
+          else
+            SHORT=prod
+          fi
+          OUT=$(./scripts/backup_docker.sh "$SHORT" | awk -F= '/BACKUP_PATH/{print $2}')
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+          echo "Created: $OUT"
+
+      # OPTIONAL: enable if your backups are < ~2 GB and you want a copy in GitHub
+      - name: Upload backup artifact
+        if: ${{ false }}  # set to true to enable
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ (github.event_name == 'workflow_dispatch' && inputs.target) || 'production' }}-backup
+          path: ${{ steps.dobackup.outputs.path }}

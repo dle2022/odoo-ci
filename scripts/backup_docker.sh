@@ -15,7 +15,7 @@ ENV_FILE="${ROOT}/.env.${ENV}"
 set -a; source "$ENV_FILE"; set +a
 
 # Defaults / normalization
-BACKUP_ROOT="${BACKUP_ROOT:-/srv/backups}"
+BACKUP_ROOT="${BACKUP_ROOT:-$HOME/github-runner/backups}"
 DB_PORT="${DB_PORT:-5432}"
 APP_CONT="${APP_CONT:-odoo-${ENV}-app}"
 DB_CONT="${DB_CONT:-odoo-${ENV}-db}"

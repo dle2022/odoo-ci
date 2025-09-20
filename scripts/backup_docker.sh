@@ -16,13 +16,12 @@ set -a; source "$ENV_FILE"; set +a
 
 # Defaults / normalization
 BACKUP_ROOT="${BACKUP_ROOT:-$HOME/github-runner/backups}"
-
 DB_PORT="${DB_PORT:-5432}"
 APP_CONT="${APP_CONT:-odoo-${ENV}-app}"
 DB_CONT="${DB_CONT:-odoo-${ENV}-db}"
 
-# Normalize DB user/password (fall back sanely if env used ${POSTGRES_*} and they were empty here)
-DB_USER="${DB_USER:-${POSTGRES_USER:-postgres}}"
+# Normalize DB user/password (fall back sanely if env used ${POSTGRES_*})
+DB_USER="${DB_USER:-${POSTGRES_USER:-}}"
 PGPASSWORD="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
 
 # --- Guard: must have a valid DB_USER ---
@@ -32,24 +31,20 @@ if [[ -z "$DB_USER" ]]; then
 fi
 
 # --- Resolve DB_NAME if missing ---
-# 1) from POSTGRES_DB in DB container, 2) from filestore folder name, else hard fail
+# 1) from POSTGRES_DB in DB container, 2) from filestore folder name
 if [[ -z "${DB_NAME:-}" ]]; then
-  # Try POSTGRES_DB inside DB container
   set +e
   DB_NAME_FROM_ENV="$(docker exec "$DB_CONT" bash -lc 'printf "%s" "$POSTGRES_DB"' 2>/dev/null)"
-  rc=$?
   set -e
-  if [[ $rc -eq 0 && -n "$DB_NAME_FROM_ENV" ]]; then
+  if [[ -n "$DB_NAME_FROM_ENV" ]]; then
     DB_NAME="$DB_NAME_FROM_ENV"
   fi
 fi
+
 if [[ -z "${DB_NAME:-}" ]]; then
-  # Try to infer from filestore folders
   FILESTORE_BASE_DEFAULT="/var/lib/odoo/.local/share/Odoo/filestore"
   FS_ROOT_CANDIDATE="${FILESTORE_IN_APP:-${FILESTORE_BASE_DEFAULT}/}"
-  # If FILESTORE_IN_APP ended with a trailing slash because ${DB_NAME} was empty, strip it
   FS_BASE="${FS_ROOT_CANDIDATE%/}"
-  # list 1st entry as a guess
   set +e
   GUESSED_DB="$(docker exec "$APP_CONT" bash -lc "ls -1d ${FS_BASE}/* 2>/dev/null | head -1 | xargs -r basename" 2>/dev/null)"
   set -e
@@ -58,29 +53,28 @@ if [[ -z "${DB_NAME:-}" ]]; then
   fi
 fi
 
-# Require an explicit DB_NAME; avoid accidental 'postgres'
+# --- Guard: DB_NAME must be set and must NOT be 'postgres' ---
 if [[ -z "${DB_NAME:-}" || "$DB_NAME" == "postgres" ]]; then
   echo "ERROR: DB_NAME is empty or 'postgres'. Set DB_NAME in .env.prod to the actual Odoo DB name." >&2
   exit 3
 fi
 
-# --- Rebuild FILESTORE_IN_APP safely ---
-# If FILESTORE_IN_APP is unset or ended up as ".../filestore/" (due to empty DB_NAME at source time), fix it.
+# --- Fix FILESTORE_IN_APP path (now that DB_NAME is known) ---
 if [[ -z "${FILESTORE_IN_APP:-}" ]]; then
   FILESTORE_IN_APP="/var/lib/odoo/.local/share/Odoo/filestore/${DB_NAME}"
 else
-  # If it ends with '/filestore' or '/filestore/', append DB_NAME
   case "$FILESTORE_IN_APP" in
     */filestore)   FILESTORE_IN_APP="${FILESTORE_IN_APP}/${DB_NAME}" ;;
     */filestore/)  FILESTORE_IN_APP="${FILESTORE_IN_APP}${DB_NAME}" ;;
-    */)            FILESTORE_IN_APP="${FILESTORE_IN_APP}${DB_NAME}" ;;  # generic trailing slash fix
+    */)            FILESTORE_IN_APP="${FILESTORE_IN_APP}${DB_NAME}" ;;
   esac
 fi
 
 TS="$(date +%Y%m%d_%H%M%S)"
 TMP="${ROOT}/.tmp-backup-${ENV}-${TS}"
 OUT="${BACKUP_ROOT}/${ENV}_odoo_${DB_NAME}_${TS}.tar.gz"
-# --- Verify BACKUP_ROOT before proceeding ---
+
+# --- Verify BACKUP_ROOT before writing ---
 mkdir -p "$BACKUP_ROOT" || true
 if [[ ! -w "$BACKUP_ROOT" ]]; then
   echo "ERROR: BACKUP_ROOT not writable: $BACKUP_ROOT (user=$(id -u -n))" >&2
@@ -88,7 +82,6 @@ if [[ ! -w "$BACKUP_ROOT" ]]; then
   exit 10
 fi
 
-# --- Now create tmp dir safely ---
 mkdir -p "${TMP}"
 
 echo "==> ENV.............: ${ENV}"
@@ -98,6 +91,8 @@ echo "==> DB_NAME.........: ${DB_NAME}"
 echo "==> DB_USER.........: ${DB_USER}"
 echo "==> FILESTORE_IN_APP: ${FILESTORE_IN_APP}"
 echo "==> OUT.............: ${OUT}"
+
+
 #mkdir -p "${TMP}" "${BACKUP_ROOT}"
 #echo "==> ENV.............: ${ENV}"
 #echo "==> APP_CONT........: ${APP_CONT}"

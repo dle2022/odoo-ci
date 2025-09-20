@@ -16,6 +16,7 @@ set -a; source "$ENV_FILE"; set +a
 
 # Defaults / normalization
 BACKUP_ROOT="${BACKUP_ROOT:-$HOME/github-runner/backups}"
+
 DB_PORT="${DB_PORT:-5432}"
 APP_CONT="${APP_CONT:-odoo-${ENV}-app}"
 DB_CONT="${DB_CONT:-odoo-${ENV}-db}"
@@ -56,7 +57,6 @@ if [[ -z "${DB_NAME:-}" ]]; then
     DB_NAME="$GUESSED_DB"
   fi
 fi
-[[ -n "${DB_NAME:-}" ]] || { echo "ERROR: DB_NAME is empty and could not be inferred. Add DB_NAME=... to $ENV_FILE"; exit 3; }
 
 # Require an explicit DB_NAME; avoid accidental 'postgres'
 if [[ -z "${DB_NAME:-}" || "$DB_NAME" == "postgres" ]]; then

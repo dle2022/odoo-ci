@@ -3,16 +3,15 @@ name: Clone Prod → Staging 2
 on:
   workflow_dispatch:
     inputs:
-      source:
+      which_backup:
         description: "Which backup to use"
         type: choice
         options: [latest, explicit_path]
         default: latest
       backup_path:
-        description: "Absolute path to an existing prod backup .tar.gz (when source=explicit_path)"
+        description: "Absolute path to an existing prod .tar.gz (when which_backup=explicit_path)"
         required: false
-        default: ""
-      transfer_mode:
+      transfer:
         description: "How to move the backup from prod job to staging job"
         type: choice
         options: [local, artifact]
@@ -26,45 +25,27 @@ jobs:
     name: Make/Select Prod Backup
     runs-on: [self-hosted, production]
     environment: production
-   # outputs:
-    #  backup_path: ${{ steps.pick.outputs.path }}
-    #  artifact_name: ${{ steps.artname.outputs.name }}
+    outputs:
+      backup_path: ${{ steps.mk.outputs.path }}
+
     steps:
       - uses: actions/checkout@v4
-        # Use the SAME secret + filename as your working backup workflow.
-    # If your green job writes .env.prod from ENV_PROD_B64, do the same here.
-      - name: Rehydrate prod env (match the green job)
+
+      # Rehydrate the SAME env file/secret as your working "Backup Odoo" job
+      - name: Rehydrate prod env
         shell: bash
         run: |
-
           set -euo pipefail
-          # 1) Secret must be non-empty
-          if [[ -z "${{ secrets.ENV_PROD_B64 }}" ]]; then
-            echo "ERROR: ENV_PROD_B64 is empty or not set"; exit 90
-          fi
-
-          # 2) Decode to the SAME filename the working workflow uses
+          [[ -n "${{ secrets.ENV_PROD_B64 }}" ]] || { echo "ENV_PROD_B64 empty"; exit 90; }
           printf '%s' "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
-
-          # 3) Normalize line endings (Windows CRLF safety)
           sed -i 's/\r$//' .env.prod || true
 
-          # 4) Masked preview (confirm DB_NAME shows up)
-          echo "----- .env.prod (masked preview) -----"
-          awk -F= 'BEGIN{OFS="="} $1=="POSTGRES_PASSWORD"{$2="******"} {print}' .env.prod | sed -n '1,200p'
-
-      # (Optional) If you moved backups from /srv/backups to /home/github-runner/backups, keep this
-      - name: Ensure BACKUP_ROOT exists & writable
-        run: |
-          mkdir -p /home/github-runner/backups
-          test -w /home/github-runner/backups || (ls -ld /home/github-runner/backups; exit 1)
-      # Either create a fresh backup (source=latest) OR trust the explicit path
       - name: Create/Select backup
-        id: out
+        id: mk
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.source }}" == "explicit_path" ]]; then
+          if [[ "${{ inputs.which_backup }}" == "explicit_path" ]]; then
             P="${{ inputs.backup_path }}"
             [[ -n "$P" && -f "$P" ]] || { echo "Given backup_path not found: $P"; exit 2; }
             echo "path=$P" >> "$GITHUB_OUTPUT"
@@ -77,36 +58,33 @@ jobs:
             echo "Created fresh backup: $OUT"
           fi
 
-####      # Name artifact deterministically (if needed for cross-host)
-      - name: Compute artifact name
-        id: artname
-        run: |
-          B="${{ steps.pick.outputs.path }}"
-          N="prod-backup-$(date +%Y%m%d-%H%M%S)-$RANDOM"
-          echo "name=$N" >> "$GITHUB_OUTPUT"
-          echo "Artifact name: $N (file=$B)"
-
-      # Optional: upload artifact when transfer_mode=artifact (for cross-host runners)
+      # Only needed when prod & staging are on different machines
       - name: Upload backup as artifact (cross-host)
-        if: ${{ inputs.transfer_mode == 'artifact' }}
+        if: ${{ inputs.transfer == 'artifact' }}
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.artname.outputs.name }}
-          path: |
-            ${{ steps.pick.outputs.path }}
-            ${{ steps.pick.outputs.path }}.sha256
-          if-no-files-found: ignore
+          name: ${{ github.run_id }}-prod-backup
+          path: ${{ steps.mk.outputs.path }}
 
   restore_to_staging:
     name: Restore to Staging
     needs: make_prod_backup
     runs-on: [self-hosted, staging]
     environment: staging
+
     steps:
       - uses: actions/checkout@v4
 
-      # Rehydrate BOTH envs on the staging runner (script reads prod+staging envs locally)
-            # --------- ARTIFACT path (for cross-host) ---------
+      # Rehydrate BOTH envs on the staging runner if your clone script reads them locally
+      - name: Rehydrate staging env
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${{ secrets.ENV_STAGING_B64 }}" ]] || { echo "ENV_STAGING_B64 empty"; exit 91; }
+          printf '%s' "${{ secrets.ENV_STAGING_B64 }}" | base64 -d > .env.staging
+          sed -i 's/\r$//' .env.staging || true
+
+      # ---------- ARTIFACT path (for cross-host) ----------
       - name: Download backup artifact (cross-host)
         if: ${{ inputs.transfer == 'artifact' }}
         uses: actions/download-artifact@v4
@@ -116,22 +94,19 @@ jobs:
 
       - name: Set restore path (artifact)
         if: ${{ inputs.transfer == 'artifact' }}
-        id: setpath
+        id: setpath_artifact
         shell: bash
         run: |
           set -euo pipefail
-          P="$(ls -1 "${{ runner.temp }}/backup/"*.tar.gz | head -1 || true)"
+          P=$(ls -1 "${{ runner.temp }}/backup/"*.tar.gz | head -1 || true)
           [[ -n "$P" && -f "$P" ]] || { echo "Artifact tar.gz not found"; exit 12; }
           echo "path=$P" >> "$GITHUB_OUTPUT"
           echo "Using artifact: $P"
 
-
-
-
-      # If local transfer, we rely on same host/shared storage
+      # ---------- LOCAL path (same host shared dir) ----------
       - name: Set restore path (local)
         if: ${{ inputs.transfer == 'local' }}
-        id: setpath
+        id: setpath_local
         shell: bash
         run: |
           set -euo pipefail
@@ -140,23 +115,13 @@ jobs:
           echo "path=$P" >> "$GITHUB_OUTPUT"
           echo "Using local shared path: $P"
 
-      # Run the clone script with --from <path> and explicit env files
+      # ---------- Restore using whichever path we set ----------
       - name: Clone Prod → Staging
         shell: bash
         run: |
           set -euo pipefail
           chmod +x scripts/clone_prod_to_staging_2.sh
-          ./scripts/clone_prod_to_staging_2.sh --from "${{ steps.setpath.outputs.path }}"
-          #chmod +x scripts/clone_prod_to_staging_2.sh
-          #if [[ "${{ inputs.transfer_mode }}" == "artifact" ]]; then
-           # SRC="${{ steps.setpath_art.outputs.path }}"
-          #else
-           # SRC="${{ steps.setpath_local.outputs.path }}"
-          #fi
-          #./scripts/clone_prod_to_staging_2.sh \
-           # --from "$SRC" \
-           # --prod-env ./.env.prod \
-            #--stage-env ./.env.staging
-
-      - name: Done
-        run: echo "Staging restored successfully ✅"
+          # prefer artifact path if present, otherwise use local
+          PATH_FROM_STEP="${{ steps.setpath_artifact.outputs.path || steps.setpath_local.outputs.path }}"
+          [[ -n "$PATH_FROM_STEP" ]] || { echo "No restore path set"; exit 13; }
+          ./scripts/clone_prod_to_staging_2.sh --from "$PATH_FROM_STEP"

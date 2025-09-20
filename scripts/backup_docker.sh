@@ -1,29 +1,63 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-# Where backups will be stored
-BACKUP_ROOT=${BACKUP_ROOT:-/srv/backups}
+# Usage: ./scripts/backup_docker.sh prod|staging
+ENV="${1:?Usage: backup_docker.sh <prod|staging>}"
 
-TARGET=${1:-prod}   # prod or staging
-DATE=$(date +%Y%m%d_%H%M%S)
-FILENAME="${BACKUP_ROOT}/${TARGET}_odoo_${DATE}.tar.gz"
+# Resolve repo root and env file
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${ROOT}/.env.${ENV}"
+[[ -f "$ENV_FILE" ]] || { echo "Missing $ENV_FILE"; exit 2; }
 
-echo "==> Backing up ${TARGET} to ${FILENAME}"
+# Load .env.<env> into this shell (POSTGRES_* etc. become available)
+set -a
+source "$ENV_FILE"
+set +a
 
-# Example: adjust container names if needed
-APP_CONT="odoo-${TARGET}-app"
-DB_CONT="odoo-${TARGET}-db"
+# Defaults / fallbacks
+BACKUP_ROOT="${BACKUP_ROOT:-/srv/backups}"
+DB_PORT="${DB_PORT:-5432}"
 
-# Dump DB
-docker exec -e PGPASSWORD=$POSTGRES_PASSWORD $DB_CONT \
-  pg_dump -U $POSTGRES_USER $DB_NAME > /tmp/db.dump
+# If APP_CONT / DB_CONT weren't in your .env, derive them from ENV
+APP_CONT="${APP_CONT:-odoo-${ENV}-app}"
+DB_CONT="${DB_CONT:-odoo-${ENV}-db}"
 
-# Copy filestore
-docker cp $APP_CONT:/var/lib/odoo/filestore /tmp/filestore
+# Path to filestore inside the app container (works with official odoo image)
+FILESTORE_IN_APP="${FILESTORE_IN_APP:-/var/lib/odoo/.local/share/Odoo/filestore/${DB_NAME}}"
 
-# Pack it up
-tar -czf "$FILENAME" -C /tmp db.dump filestore
+# Scratch + output path
+TS="$(date +%Y%m%d_%H%M%S)"
+TMP="${ROOT}/.tmp-backup-${ENV}-${TS}"
+OUT="${BACKUP_ROOT}/${ENV}_odoo_${DB_NAME}_${TS}.tar.gz"
 
-rm -rf /tmp/db.dump /tmp/filestore
+mkdir -p "$TMP" "$BACKUP_ROOT"
 
-echo "BACKUP_PATH=$FILENAME"
+echo "==> Dumping DB from ${DB_CONT} (db=${DB_NAME}, user=${POSTGRES_USER})"
+docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" \
+  "${DB_CONT}" pg_dump -U "${POSTGRES_USER}" -p "${DB_PORT}" -F c -d "${DB_NAME}" -f /tmp/db.dump
+
+docker cp "${DB_CONT}:/tmp/db.dump" "${TMP}/db.dump" && \
+  docker exec "${DB_CONT}" rm -f /tmp/db.dump || true
+
+echo "==> Copying filestore from ${APP_CONT}:${FILESTORE_IN_APP}"
+mkdir -p "${TMP}/filestore"
+# copy may be empty on a brand-new DB; that's ok
+docker cp "${APP_CONT}:${FILESTORE_IN_APP}/." "${TMP}/filestore/" 2>/dev/null || true
+
+# (optional) include config snapshot if you keep per-env conf in repo
+mkdir -p "${TMP}/config"
+[[ -f "${ROOT}/odoo/config/odoo.${ENV}.conf" ]] && \
+  cp -a "${ROOT}/odoo/config/odoo.${ENV}.conf" "${TMP}/config/" || true
+
+echo "==> Creating ${OUT}"
+tar -C "${TMP}" -czf "${OUT}" db.dump filestore config 2>/dev/null \
+  || tar -C "${TMP}" -czf "${OUT}" db.dump filestore
+sha256sum "${OUT}" > "${OUT}.sha256"
+
+rm -rf "${TMP}"
+
+# keep last N days (default 14)
+RETENTION_DAYS="${RETENTION_DAYS:-14}"
+find "${BACKUP_ROOT}" -type f -name "${ENV}_odoo_*.tar.gz" -mtime +${RETENTION_DAYS} -delete || true
+
+echo "BACKUP_PATH=${OUT}"

@@ -34,8 +34,8 @@ jobs:
       # Rehydrate prod backup env (so scripts can read BACKUP_ROOT, container names, etc)
       - name: Rehydrate prod backup env
         run: |
-          echo "${{ secrets.ENV_BACKUP_PROD_B64 }}" | base64 -d > .env.backup.prod
-          ls -la .env.backup.prod
+          echo "${{ secrets.ENV_BACKUP_PROD_B64 }}" | base64 -d > .env.prod
+          ls -la .env.prod
 
       # Either create a fresh backup (source=latest) OR trust the explicit path
       - name: Create/Select backup
@@ -86,9 +86,9 @@ jobs:
       # Rehydrate BOTH envs on the staging runner (script reads prod+staging envs locally)
       - name: Rehydrate backup envs (prod + staging)
         run: |
-          echo "${{ secrets.ENV_BACKUP_PROD_B64 }}" | base64 -d > .env.backup.prod
-          echo "${{ secrets.ENV_BACKUP_STAGING_B64 }}" | base64 -d > .env.backup.staging
-          ls -la .env.backup.*
+          echo "${{ secrets.ENV_BACKUP_PROD_B64 }}" | base64 -d > .env.prod
+          echo "${{ secrets.ENV_BACKUP_STAGING_B64 }}" | base64 -d > .env.staging
+          ls -la .env.*
 
       # If we used artifact, download to local workspace and set PATH_TO_RESTORE
       - name: Download backup artifact (cross-host)

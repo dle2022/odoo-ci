@@ -1,14 +1,35 @@
 name: Clone Prod → Staging
 on:
   workflow_dispatch: {}
+
 permissions:
   contents: read
+
 jobs:
-  clone-refresh:
+  make_prod_backup:
+    name: Make prod backup
+    runs-on: [self-hosted, production]
+    outputs:
+      backup_path: ${{ steps.out.outputs.path }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Backup prod
+        id: out
+        run: |
+          chmod +x scripts/backup_docker.sh
+          P=$(./scripts/backup_docker.sh prod | awk -F= '/BACKUP_PATH/{print $2}')
+          echo "path=$P" >> "$GITHUB_OUTPUT"
+          echo "Backup: $P"
+
+  restore_to_staging:
+    name: Restore to staging
+    needs: make_prod_backup
     runs-on: [self-hosted, staging]
     steps:
       - uses: actions/checkout@v4
-      - name: Refresh Staging from Production
+      - name: Restore backup on staging
         run: |
-          chmod +x scripts/clone_prod_to_staging.sh
-          ./scripts/clone_prod_to_staging.sh
+          chmod +x scripts/restore_docker.sh
+          ./scripts/restore_docker.sh staging "${{ needs.make_prod_backup.outputs.backup_path }}"
+          # If you want to keep current staging DB and load into a new one, use a 3rd arg:
+          # ./scripts/restore_docker.sh staging "${{ needs.make_prod_backup.outputs.backup_path }}" prodclone

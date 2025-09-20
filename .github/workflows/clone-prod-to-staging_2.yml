@@ -27,19 +27,27 @@ jobs:
     runs-on: [self-hosted, production]
     outputs:
       backup_path: ${{ steps.pick.outputs.path }}
-      artifact_name: ${{ steps.artname.outputs.name }}
+    #  artifact_name: ${{ steps.artname.outputs.name }}
     steps:
       - uses: actions/checkout@v4
-
-      # Rehydrate prod backup env (so scripts can read BACKUP_ROOT, container names, etc)
-      - name: Rehydrate prod backup env
+        # Use the SAME secret + filename as your working backup workflow.
+    # If your green job writes .env.prod from ENV_PROD_B64, do the same here.
+      - name: Rehydrate prod env (match the green job)
         run: |
-          echo "${{ secrets.ENV_BACKUP_PROD_B64 }}" | base64 -d > .env.prod
-          ls -la .env.prod
+          echo "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
+          # normalize line endings on the runner
+          sed -i 's/\r$//' .env.prod || true
+          echo "----- .env.prod (masked preview) -----"
+          sed -E 's/(POSTGRES_PASSWORD=).*/\1******/' .env.prod | sed -n '1,200p
 
+      # (Optional) If you moved backups from /srv/backups to /home/github-runner/backups, keep this
+      - name: Ensure BACKUP_ROOT exists & writable
+        run: |
+          mkdir -p /home/github-runner/backups
+          test -w /home/github-runner/backups || (ls -ld /home/github-runner/backups; exit 1)
       # Either create a fresh backup (source=latest) OR trust the explicit path
       - name: Create/Select backup
-        id: pick
+        id: out
         shell: bash
         run: |
           set -euo pipefail
@@ -56,7 +64,7 @@ jobs:
             echo "Created fresh backup: $OUT"
           fi
 
-      # Name artifact deterministically (if needed for cross-host)
+####      # Name artifact deterministically (if needed for cross-host)
       - name: Compute artifact name
         id: artname
         run: |
@@ -129,8 +137,8 @@ jobs:
           fi
           ./scripts/clone_prod_to_staging_2.sh \
             --from "$SRC" \
-            --prod-env ./.env.backup.prod \
-            --stage-env ./.env.backup.staging
+            --prod-env ./.env.prod \
+            --stage-env ./.env.staging
 
       - name: Done
         run: echo "Staging restored successfully ✅"

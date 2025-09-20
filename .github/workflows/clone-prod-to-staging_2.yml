@@ -33,12 +33,24 @@ jobs:
         # Use the SAME secret + filename as your working backup workflow.
     # If your green job writes .env.prod from ENV_PROD_B64, do the same here.
       - name: Rehydrate prod env (match the green job)
+        shell: bash
         run: |
-          echo "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
-          # normalize line endings on the runner
+
+          set -euo pipefail
+          # 1) Secret must be non-empty
+          if [[ -z "${{ secrets.ENV_PROD_B64 }}" ]]; then
+            echo "ERROR: ENV_PROD_B64 is empty or not set"; exit 90
+          fi
+
+          # 2) Decode to the SAME filename the working workflow uses
+          printf '%s' "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
+
+          # 3) Normalize line endings (Windows CRLF safety)
           sed -i 's/\r$//' .env.prod || true
+
+          # 4) Masked preview (confirm DB_NAME shows up)
           echo "----- .env.prod (masked preview) -----"
-          sed -E 's/(POSTGRES_PASSWORD=).*/\1******/' .env.prod | sed -n '1,200p
+          awk -F= 'BEGIN{OFS="="} $1=="POSTGRES_PASSWORD"{$2="******"} {print}' .env.prod | sed -n '1,200p'
 
       # (Optional) If you moved backups from /srv/backups to /home/github-runner/backups, keep this
       - name: Ensure BACKUP_ROOT exists & writable

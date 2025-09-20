@@ -4,86 +4,158 @@ set -euo pipefail
 # Usage:
 #   ./scripts/backup_docker.sh prod
 #   ./scripts/backup_docker.sh staging
-#   ./scripts/backup_docker.sh .env.custom   # optional direct file
 
-ARG="${1:-prod}"
+ENV="${1:?Usage: backup_docker.sh <prod|staging>}"
 
-# Resolve env file from argument
-if [[ "$ARG" == "prod" ]]; then
-  ENV_FILE=".env.prod"
-elif [[ "$ARG" == "staging" ]]; then
-  ENV_FILE=".env.staging"
-else
-  ENV_FILE="$ARG"
-fi
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${ROOT}/.env.${ENV}"
+[[ -f "$ENV_FILE" ]] || { echo "Missing $ENV_FILE"; exit 2; }
 
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "Missing env file: $ENV_FILE" >&2
-  exit 1
-fi
-# shellcheck disable=SC1090
-source "$ENV_FILE"
+# Load env (allow indirect refs like ${POSTGRES_USER})
+set -a; source "$ENV_FILE"; set +a
 
-# Validate required vars
-: "${APP_CONT:?APP_CONT missing}"
-: "${DB_CONT:?DB_CONT missing}"
-: "${DB_NAME:?DB_NAME missing}"
-: "${DB_USER:?DB_USER missing}"
-: "${FILESTORE_IN_APP:?FILESTORE_IN_APP missing}"
+# Defaults / normalization
 BACKUP_ROOT="${BACKUP_ROOT:-/srv/backups}"
-RETENTION_DAYS="${RETENTION_DAYS:-14}"
+DB_PORT="${DB_PORT:-5432}"
+APP_CONT="${APP_CONT:-odoo-${ENV}-app}"
+DB_CONT="${DB_CONT:-odoo-${ENV}-db}"
 
-STAMP="$(date +'%Y%m%d-%H%M%S')"
-OUT_DIR="${BACKUP_ROOT}/${STAMP}"
-mkdir -p "$OUT_DIR"
+# Normalize DB user/password (fall back sanely if env used ${POSTGRES_*} and they were empty here)
+DB_USER="${DB_USER:-${POSTGRES_USER:-postgres}}"
+PGPASSWORD="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
 
-echo "[*] Backup start -> ${OUT_DIR}"
+# --- Resolve DB_NAME if missing ---
+# 1) from POSTGRES_DB in DB container, 2) from filestore folder name, else hard fail
+if [[ -z "${DB_NAME:-}" ]]; then
+  # Try POSTGRES_DB inside DB container
+  set +e
+  DB_NAME_FROM_ENV="$(docker exec "$DB_CONT" bash -lc 'printf "%s" "$POSTGRES_DB"' 2>/dev/null)"
+  rc=$?
+  set -e
+  if [[ $rc -eq 0 && -n "$DB_NAME_FROM_ENV" ]]; then
+    DB_NAME="$DB_NAME_FROM_ENV"
+  fi
+fi
+if [[ -z "${DB_NAME:-}" ]]; then
+  # Try to infer from filestore folders
+  FILESTORE_BASE_DEFAULT="/var/lib/odoo/.local/share/Odoo/filestore"
+  FS_ROOT_CANDIDATE="${FILESTORE_IN_APP:-${FILESTORE_BASE_DEFAULT}/}"
+  # If FILESTORE_IN_APP ended with a trailing slash because ${DB_NAME} was empty, strip it
+  FS_BASE="${FS_ROOT_CANDIDATE%/}"
+  # list 1st entry as a guess
+  set +e
+  GUESSED_DB="$(docker exec "$APP_CONT" bash -lc "ls -1d ${FS_BASE}/* 2>/dev/null | head -1 | xargs -r basename" 2>/dev/null)"
+  set -e
+  if [[ -n "$GUESSED_DB" ]]; then
+    DB_NAME="$GUESSED_DB"
+  fi
+fi
+[[ -n "${DB_NAME:-}" ]] || { echo "ERROR: DB_NAME is empty and could not be inferred. Add DB_NAME=... to $ENV_FILE"; exit 3; }
 
-# 1) Backup Postgres roles/globals (optional but recommended)
-if docker exec "$DB_CONT" bash -lc "command -v pg_dumpall >/dev/null 2>&1"; then
-  echo "  - Dumping Postgres globals (roles)"
-  docker exec -e PGPASSWORD="${PGPASSWORD:-}" "$DB_CONT" \
-    pg_dumpall -U "$DB_USER" -g | gzip > "${OUT_DIR}/globals.sql.gz"
+# --- Rebuild FILESTORE_IN_APP safely ---
+# If FILESTORE_IN_APP is unset or ended up as ".../filestore/" (due to empty DB_NAME at source time), fix it.
+if [[ -z "${FILESTORE_IN_APP:-}" ]]; then
+  FILESTORE_IN_APP="/var/lib/odoo/.local/share/Odoo/filestore/${DB_NAME}"
 else
-  echo "  - Skip globals: pg_dumpall not available in container"
+  # If it ends with '/filestore' or '/filestore/', append DB_NAME
+  case "$FILESTORE_IN_APP" in
+    */filestore)   FILESTORE_IN_APP="${FILESTORE_IN_APP}/${DB_NAME}" ;;
+    */filestore/)  FILESTORE_IN_APP="${FILESTORE_IN_APP}${DB_NAME}" ;;
+    */)            FILESTORE_IN_APP="${FILESTORE_IN_APP}${DB_NAME}" ;;  # generic trailing slash fix
+  esac
 fi
 
-# 2) Backup specific DB
-echo "  - Dumping database: ${DB_NAME}"
-docker exec -e PGPASSWORD="${PGPASSWORD:-}" "$DB_CONT" \
-  pg_dump -U "$DB_USER" -d "$DB_NAME" -F p --no-owner --no-privileges \
-  | gzip > "${OUT_DIR}/${DB_NAME}.sql.gz"
+TS="$(date +%Y%m%d_%H%M%S)"
+TMP="${ROOT}/.tmp-backup-${ENV}-${TS}"
+OUT="${BACKUP_ROOT}/${ENV}_odoo_${DB_NAME}_${TS}.tar.gz"
+mkdir -p "${TMP}" "${BACKUP_ROOT}"
 
-# 3) Backup filestore from app container
-echo "  - Archiving filestore from ${APP_CONT}:${FILESTORE_IN_APP}"
-docker exec "$APP_CONT" bash -lc "tar -C / -czf - \"${FILESTORE_IN_APP#/}\"" \
-  > "${OUT_DIR}/filestore.tar.gz"
+echo "==> ENV.............: ${ENV}"
+echo "==> APP_CONT........: ${APP_CONT}"
+echo "==> DB_CONT.........: ${DB_CONT}"
+echo "==> DB_NAME.........: ${DB_NAME}"
+echo "==> DB_USER.........: ${DB_USER}"
+echo "==> FILESTORE_IN_APP: ${FILESTORE_IN_APP}"
+echo "==> OUT.............: ${OUT}"
 
-# 4) Optional: backup extra addons if present
-if docker exec "$APP_CONT" bash -lc "test -d /mnt/extra-addons"; then
-  echo "  - Archiving /mnt/extra-addons"
-  docker exec "$APP_CONT" bash -lc "tar -C / -czf - mnt/extra-addons" \
-    > "${OUT_DIR}/addons.tar.gz"
+# ---- Preflight: verify containers & filestore path ----
+set +e
+docker ps --format 'table {{.Names}}\t{{.Status}}' | grep -E "(${APP_CONT}|${DB_CONT})" >/dev/null
+[[ $? -eq 0 ]] || { echo "ERROR: One or both containers not running: ${APP_CONT}, ${DB_CONT}"; exit 4; }
+set -e
+
+echo "==> Checking filestore path in ${APP_CONT}"
+if docker exec "${APP_CONT}" bash -lc "test -d '${FILESTORE_IN_APP}'"; then
+  docker exec "${APP_CONT}" bash -lc "du -sh '${FILESTORE_IN_APP}' || true"
+else
+  echo "WARN: Filestore path not found in container: ${FILESTORE_IN_APP}" >&2
 fi
 
-# 5) Write a manifest
-cat > "${OUT_DIR}/manifest.txt" <<EOF
-timestamp=${STAMP}
+# ===================== DB DUMP =====================
+echo "==> Dumping DB from ${DB_CONT}"
+DB_TMP_DIR="/var/lib/postgresql/tmp-backup"
+docker exec "${DB_CONT}" bash -lc "rm -rf '${DB_TMP_DIR}'; mkdir -p '${DB_TMP_DIR}' && chmod 700 '${DB_TMP_DIR}'"
+
+# Prefer custom format (-Fc) for reliable restores
+if [[ -n "$PGPASSWORD" ]]; then
+  docker exec -e PGPASSWORD="${PGPASSWORD}" \
+    "${DB_CONT}" bash -lc "pg_dump -U '${DB_USER}' -d '${DB_NAME}' -F c -f '${DB_TMP_DIR}/db.dump'"
+else
+  docker exec \
+    "${DB_CONT}" bash -lc "pg_dump -U '${DB_USER}' -d '${DB_NAME}' -F c -f '${DB_TMP_DIR}/db.dump'"
+fi
+
+docker cp "${DB_CONT}:${DB_TMP_DIR}/db.dump" "${TMP}/db.dump"
+docker exec "${DB_CONT}" bash -lc "rm -rf '${DB_TMP_DIR}'"
+
+if [[ ! -s "${TMP}/db.dump" ]]; then
+  echo "ERROR: db.dump is missing or empty after pg_dump + docker cp." >&2
+  ls -l "${TMP}" || true
+  exit 5
+fi
+echo "==> DB dump size: $(du -h "${TMP}/db.dump" | awk '{print $1}')"
+
+# ===================== FILESTORE COPY =====================
+echo "==> Copying filestore"
+mkdir -p "${TMP}/filestore"
+# Use tar over STDOUT to avoid docker cp quirks & preserve perms
+if docker exec "${APP_CONT}" bash -lc "test -d '${FILESTORE_IN_APP}'"; then
+  docker exec "${APP_CONT}" bash -lc "tar -C '${FILESTORE_IN_APP%/}' -czf - '.'" > "${TMP}/filestore.tgz" || {
+    echo "WARN: tar of filestore failed; continuing without filestore." >&2
+    rm -f "${TMP}/filestore.tgz"
+  }
+else
+  echo "WARN: Skipping filestore (path missing): ${FILESTORE_IN_APP}" >&2
+fi
+
+# ===================== PACKAGE BACKUP =====================
+echo "==> Creating archive ${OUT}"
+# Build a manifest for transparency
+cat > "${TMP}/manifest.txt" <<EOF
+env=${ENV}
+timestamp=${TS}
 db_name=${DB_NAME}
+db_user=${DB_USER}
 app_container=${APP_CONT}
 db_container=${DB_CONT}
 filestore=${FILESTORE_IN_APP}
 EOF
 
-# 6) Retention
-if [[ "${RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
-  echo "  - Enforcing retention: ${RETENTION_DAYS} days"
-  find "${BACKUP_ROOT}" -maxdepth 1 -type d -name '20*' -mtime +${RETENTION_DAYS} -print -exec rm -rf {} \; || true
+# Compose final tar: db.dump + optional filestore.tgz + manifest
+if [[ -f "${TMP}/filestore.tgz" ]]; then
+  tar -C "${TMP}" -czf "${OUT}" db.dump filestore.tgz manifest.txt
+else
+  tar -C "${TMP}" -czf "${OUT}" db.dump manifest.txt
 fi
+sha256sum "${OUT}" > "${OUT}.sha256"
 
-echo "  - Listing output:"
-ls -lh "${OUT_DIR}"
+# cleanup
+rm -rf "${TMP}"
 
-# IMPORTANT: print a machine-parsable line for the GitHub step output
-echo "BACKUP_PATH=${OUT_DIR}"
-echo "[✓] Backup complete"
+# retention
+RETENTION_DAYS="${RETENTION_DAYS:-14}"
+find "${BACKUP_ROOT}" -type f -name "${ENV}_odoo_*.tar.gz" -mtime +${RETENTION_DAYS} -delete || true
+find "${BACKUP_ROOT}" -type f -name "${ENV}_odoo_*.tar.gz.sha256" -mtime +${RETENTION_DAYS} -delete || true
+
+echo "BACKUP_PATH=${OUT}"
+echo "==> Done."

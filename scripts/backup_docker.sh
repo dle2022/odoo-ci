@@ -39,6 +39,15 @@ docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" \
 docker cp "${DB_CONT}:/tmp/db.dump" "${TMP}/db.dump" && \
   docker exec "${DB_CONT}" rm -f /tmp/db.dump || true
 
+# After copying filestore
+COUNT=$(find "${TMP}/filestore" -type f | wc -l | tr -d ' ')
+SIZE=$(du -sh "${TMP}/filestore" 2>/dev/null | awk "{print \$1}")
+echo "==> Filestore files copied: ${COUNT} (size: ${SIZE:-0})"
+if [ "$COUNT" = "0" ]; then
+  echo "NOTE: Filestore appears empty. This is normal if your DB has no attachments yet."
+fi
+
+
 echo "==> Copying filestore from ${APP_CONT}:${FILESTORE_IN_APP}"
 mkdir -p "${TMP}/filestore"
 # copy may be empty on a brand-new DB; that's ok

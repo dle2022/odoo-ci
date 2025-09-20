@@ -24,6 +24,12 @@ DB_CONT="${DB_CONT:-odoo-${ENV}-db}"
 DB_USER="${DB_USER:-${POSTGRES_USER:-postgres}}"
 PGPASSWORD="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
 
+# --- Guard: must have a valid DB_USER ---
+if [[ -z "$DB_USER" ]]; then
+  echo "ERROR: DB_USER/POSTGRES_USER not set; cannot run pg_dump." >&2
+  exit 3
+fi
+
 # --- Resolve DB_NAME if missing ---
 # 1) from POSTGRES_DB in DB container, 2) from filestore folder name, else hard fail
 if [[ -z "${DB_NAME:-}" ]]; then
@@ -51,6 +57,12 @@ if [[ -z "${DB_NAME:-}" ]]; then
   fi
 fi
 [[ -n "${DB_NAME:-}" ]] || { echo "ERROR: DB_NAME is empty and could not be inferred. Add DB_NAME=... to $ENV_FILE"; exit 3; }
+
+# Require an explicit DB_NAME; avoid accidental 'postgres'
+if [[ -z "${DB_NAME:-}" || "$DB_NAME" == "postgres" ]]; then
+  echo "ERROR: DB_NAME is empty or 'postgres'. Set DB_NAME in .env.prod to the actual Odoo DB name." >&2
+  exit 3
+fi
 
 # --- Rebuild FILESTORE_IN_APP safely ---
 # If FILESTORE_IN_APP is unset or ended up as ".../filestore/" (due to empty DB_NAME at source time), fix it.

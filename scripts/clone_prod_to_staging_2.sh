@@ -57,8 +57,8 @@ STAGE_ENV_FILE="${STAGE_ENV_FILE:-$([[ -f "${PROJECT_DIR}/.env.backup.staging" ]
 
 # Load PROD env (for BACKUP_ROOT and prod DB name)
 set -a; source "$PROD_ENV_FILE"; set +a
-BACKUP_ROOT="${BACKUP_ROOT:-/srv/backups}"
-DB_USER_PROD="${DB_USER:-${POSTGRES_USER:-postgres}}"
+BACKUP_ROOT="${BACKUP_ROOT:-/home/github-runner/backups}"
+DB_USER_PROD="${DB_USER:-${POSTGRES_USER:-odoo}}"
 PGPASSWORD_PROD="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
 DB_NAME_PROD="${DB_NAME:-}"
 # We may not strictly need PROD creds since we restore from tarball, but we read prod DB name
@@ -66,7 +66,7 @@ DB_NAME_PROD="${DB_NAME:-}"
 
 # Load STAGING env (for target containers/paths/creds)
 set -a; source "$STAGE_ENV_FILE"; set +a
-DB_USER_STAGE="${DB_USER:-${POSTGRES_USER:-postgres}}"
+DB_USER_STAGE="${DB_USER:-${POSTGRES_USER:-odoo}}"
 PGPASSWORD_STAGE="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
 DB_NAME_STAGE="${DB_NAME:?DB_NAME missing in $STAGE_ENV_FILE}"
 FILESTORE_IN_APP_STAGE="${FILESTORE_IN_APP:-/var/lib/odoo/.local/share/Odoo/filestore/${DB_NAME_STAGE}}"

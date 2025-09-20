@@ -1,16 +1,28 @@
-# .github/workflows/deploy.yml
 name: Deploy Odoo (Prod & Staging)
 
 on:
   push:
-    branches: ["staging","main"]
+    branches: ["staging", "main"]
   workflow_dispatch:
+    inputs:
+      target:
+        description: "Deploy target"
+        type: choice
+        options: [staging, production]
+        default: staging
 
 jobs:
   deploy-staging:
-    if: github.ref == 'refs/heads/staging' || github.event_name == 'workflow_dispatch'
+    name: Deploy Staging
+    # Run when:
+    #  - pushed to staging, OR
+    #  - manual run with target=staging
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/staging') ||
+      (github.event_name == 'workflow_dispatch' && inputs.target == 'staging')
     runs-on: [self-hosted, staging]
     environment: staging
+
     steps:
       - uses: actions/checkout@v4
 
@@ -18,17 +30,24 @@ jobs:
         run: |
           echo "${{ secrets.ENV_STAGING_B64 }}" | base64 -d > .env.staging
           chmod 600 .env.staging
-          ls -la .env.*   # debug; remove later
+          ls -la .env.*  # debug
 
-      - name: Deploy Staging
+      - name: Deploy
         run: |
           chmod +x scripts/deploy.sh
           ./scripts/deploy.sh staging
 
   deploy-prod:
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: Deploy Production
+    # Run when:
+    #  - pushed to main, OR
+    #  - manual run with target=production
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.target == 'production')
     runs-on: [self-hosted, production]
     environment: production
+
     steps:
       - uses: actions/checkout@v4
 
@@ -36,9 +55,9 @@ jobs:
         run: |
           echo "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
           chmod 600 .env.prod
-          ls -la .env.*   # debug; remove later
+          ls -la .env.*  # debug
 
-      - name: Deploy Production
+      - name: Deploy
         run: |
           chmod +x scripts/deploy.sh
           ./scripts/deploy.sh prod

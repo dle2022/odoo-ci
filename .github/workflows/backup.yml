@@ -51,29 +51,29 @@ jobs:
           docker exec "$APP_CONT" bash -lc "find '${FILESTORE_IN_APP}' -type f | head -10 || true"
 
       - name: Ensure BACKUP_ROOT exists & writable
-          run: |
-            set -euo pipefail
-            # Reuse the same env file selection as your job
-            if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.target }}" == "staging" ]]; then
-              ENV_FILE=".env.backup.staging"
-            else
-            # or .env.prod if you’re not splitting envs
-              ENV_FILE=".env.backup.prod"
-            fi
-            source "$ENV_FILE"
-            echo "BACKUP_ROOT=${BACKUP_ROOT:-/srv/backups}"
+        run: |
+          set -euo pipefail
+          # Reuse the same env file selection as your job
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.target }}" == "staging" ]]; then
+            ENV_FILE=".env.backup.staging"
+          else
+          # or .env.prod if you’re not splitting envs
+            ENV_FILE=".env.backup.prod"
+          fi
+          source "$ENV_FILE"
+          echo "BACKUP_ROOT=${BACKUP_ROOT:-/srv/backups}"
 
-            mkdir -p "${BACKUP_ROOT}" || true
-            if [[ ! -w "${BACKUP_ROOT}" ]]; then
-              echo "ERROR: BACKUP_ROOT is not writable by $(id -u -n): ${BACKUP_ROOT}"
-              ls -ld "${BACKUP_ROOT}" || true
-              id || true
-              exit 99
-             fi
+          mkdir -p "${BACKUP_ROOT}" || true
+          if [[ ! -w "${BACKUP_ROOT}" ]]; then
+            echo "ERROR: BACKUP_ROOT is not writable by $(id -u -n): ${BACKUP_ROOT}"
+            ls -ld "${BACKUP_ROOT}" || true
+            id || true
+            exit 99
+          fi
 
-            echo "Disk space:"
-            df -h .
-            df -h "${BACKUP_ROOT}" || true
+          echo "Disk space:"
+          df -h .
+          df -h "${BACKUP_ROOT}" || true
 
 
       - name: Run backup

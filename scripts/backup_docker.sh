@@ -12,7 +12,12 @@ ENV_FILE="${ROOT}/.env.${ENV}"
 [[ -f "$ENV_FILE" ]] || { echo "Missing $ENV_FILE"; exit 2; }
 
 # Load env (allow indirect refs like ${POSTGRES_USER})
+#set -a; source "$ENV_FILE"; set +a
+
 set -a; source "$ENV_FILE"; set +a
+echo "DBG: using $ENV_FILE"
+echo "DBG: POSTGRES_USER='${POSTGRES_USER:-<unset>}' DB_USER(before normalize)='${DB_USER:-<unset>}' DB_NAME='${DB_NAME:-<unset>}'"
+
 
 # Defaults / normalization
 BACKUP_ROOT="${BACKUP_ROOT:-$HOME/github-runner/backups}"

@@ -51,6 +51,17 @@ jobs:
           docker exec "$APP_CONT" bash -lc "find '${FILESTORE_IN_APP}' -type f | head -10 || true"
 
 
+      - name: Ensure /srv/backups is writable
+        run: |
+          set -eux
+          sudo mkdir -p /srv/backups
+          sudo chown -R "$USER:$USER" /srv/backups
+          sudo chmod 2775 /srv/backups
+          df -h
+          stat -c "%a %U:%G %n" /srv/backups
+
+
+
       - name: Run backup
         id: dobackup
         run: |

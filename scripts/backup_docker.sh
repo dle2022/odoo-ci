@@ -39,19 +39,31 @@ else
   echo "WARN: Filestore path not found in container: ${FILESTORE_IN_APP}" >&2
 fi
 
+
+# --- inside scripts/backup_docker.sh, replace the DB dump block with this ---
+
 echo "==> Dumping DB from ${DB_CONT}"
+DB_TMP_DIR="/var/lib/postgresql/tmp-backup"
+# create a safe temp dir owned by the container's default user
+docker exec "${DB_CONT}" bash -lc "rm -rf '${DB_TMP_DIR}'; mkdir -p '${DB_TMP_DIR}' && chmod 700 '${DB_TMP_DIR}'"
+
+# do the dump into that dir
 docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" \
-  "${DB_CONT}" pg_dump -U "${POSTGRES_USER}" -p "${DB_PORT}" -F c -d "${DB_NAME}" -f /tmp/db.dump
+  "${DB_CONT}" bash -lc "pg_dump -U '${POSTGRES_USER}' -d '${DB_NAME}' -F c -f '${DB_TMP_DIR}/db.dump'"
 
-docker cp "${DB_CONT}:/tmp/db.dump" "${TMP}/db.dump"
-docker exec "${DB_CONT}" rm -f /tmp/db.dump || true
+# copy out and clean up
+docker cp "${DB_CONT}:${DB_TMP_DIR}/db.dump" "${TMP}/db.dump"
+docker exec "${DB_CONT}" bash -lc "rm -rf '${DB_TMP_DIR}'"
 
+# verify
 if [[ ! -s "${TMP}/db.dump" ]]; then
   echo "ERROR: db.dump is missing or empty after pg_dump + docker cp." >&2
   ls -l "${TMP}" || true
   exit 3
 fi
 echo "==> DB dump size: $(du -h "${TMP}/db.dump" | awk '{print $1}')"
+
+
 
 echo "==> Preparing filestore target dir"
 mkdir -p "${TMP}/filestore"

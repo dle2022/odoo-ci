@@ -101,37 +101,38 @@ jobs:
     name: Restore to Staging
     needs: make_prod_backup
     runs-on: [self-hosted, staging]
+    environment: staging
     steps:
       - uses: actions/checkout@v4
 
       # Rehydrate BOTH envs on the staging runner (script reads prod+staging envs locally)
-      - name: Rehydrate backup envs (prod + staging)
-        run: |
-          echo "${{ secrets.ENV_BACKUP_PROD_B64 }}" | base64 -d > .env.prod
-          echo "${{ secrets.ENV_BACKUP_STAGING_B64 }}" | base64 -d > .env.staging
-          ls -la .env.*
+            # --------- ARTIFACT path (for cross-host) ---------
+     - name: Download backup artifact (cross-host)
+       if: ${{ inputs.transfer == 'artifact' }}
+       uses: actions/download-artifact@v4
+       with:
+         name: ${{ github.run_id }}-prod-backup
+         path: ${{ runner.temp }}/backup
 
-      # If we used artifact, download to local workspace and set PATH_TO_RESTORE
-      - name: Download backup artifact (cross-host)
-        if: ${{ inputs.transfer_mode == 'artifact' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.make_prod_backup.outputs.artifact_name }}
-          path: ./_artifact
-      - name: Set restore path (artifact)
-        if: ${{ inputs.transfer_mode == 'artifact' }}
-        id: setpath_art
-        run: |
-          set -euo pipefail
-          P=$(ls -1t ./_artifact/*.tar.gz | head -1)
-          [[ -n "$P" ]] || { echo "No .tar.gz in artifact"; exit 10; }
-          echo "path=$P" >> "$GITHUB_OUTPUT"
-          echo "Using artifact path: $P"
+     - name: Set restore path (artifact)
+       if: ${{ inputs.transfer == 'artifact' }}
+       id: setpath
+       shell: bash
+       run: |
+         set -euo pipefail
+         P="$(ls -1 "${{ runner.temp }}/backup/"*.tar.gz | head -1 || true)"
+         [[ -n "$P" && -f "$P" ]] || { echo "Artifact tar.gz not found"; exit 12; }
+         echo "path=$P" >> "$GITHUB_OUTPUT"
+         echo "Using artifact: $P"
+
+
+
 
       # If local transfer, we rely on same host/shared storage
       - name: Set restore path (local)
-        if: ${{ inputs.transfer_mode == 'local' }}
-        id: setpath_local
+        if: ${{ inputs.transfer == 'local' }}
+        id: setpath
+        shell: bash
         run: |
           set -euo pipefail
           P="${{ needs.make_prod_backup.outputs.backup_path }}"
@@ -141,17 +142,21 @@ jobs:
 
       # Run the clone script with --from <path> and explicit env files
       - name: Clone Prod → Staging
+        shell: bash
         run: |
+          set -euo pipefail
           chmod +x scripts/clone_prod_to_staging_2.sh
-          if [[ "${{ inputs.transfer_mode }}" == "artifact" ]]; then
-            SRC="${{ steps.setpath_art.outputs.path }}"
-          else
-            SRC="${{ steps.setpath_local.outputs.path }}"
-          fi
-          ./scripts/clone_prod_to_staging_2.sh \
-            --from "$SRC" \
-            --prod-env ./.env.prod \
-            --stage-env ./.env.staging
+          ./scripts/clone_prod_to_staging_2.sh --from "${{ steps.setpath.outputs.path }}"
+          #chmod +x scripts/clone_prod_to_staging_2.sh
+          #if [[ "${{ inputs.transfer_mode }}" == "artifact" ]]; then
+           # SRC="${{ steps.setpath_art.outputs.path }}"
+          #else
+           # SRC="${{ steps.setpath_local.outputs.path }}"
+          #fi
+          #./scripts/clone_prod_to_staging_2.sh \
+           # --from "$SRC" \
+           # --prod-env ./.env.prod \
+            #--stage-env ./.env.staging
 
       - name: Done
         run: echo "Staging restored successfully ✅"

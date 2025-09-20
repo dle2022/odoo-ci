@@ -68,7 +68,16 @@ fi
 TS="$(date +%Y%m%d_%H%M%S)"
 TMP="${ROOT}/.tmp-backup-${ENV}-${TS}"
 OUT="${BACKUP_ROOT}/${ENV}_odoo_${DB_NAME}_${TS}.tar.gz"
-mkdir -p "${TMP}" "${BACKUP_ROOT}"
+# --- Verify BACKUP_ROOT before proceeding ---
+mkdir -p "$BACKUP_ROOT" || true
+if [[ ! -w "$BACKUP_ROOT" ]]; then
+  echo "ERROR: BACKUP_ROOT not writable: $BACKUP_ROOT (user=$(id -u -n))" >&2
+  ls -ld "$BACKUP_ROOT" >&2 || true
+  exit 10
+fi
+
+# --- Now create tmp dir safely ---
+mkdir -p "${TMP}"
 
 echo "==> ENV.............: ${ENV}"
 echo "==> APP_CONT........: ${APP_CONT}"
@@ -77,6 +86,14 @@ echo "==> DB_NAME.........: ${DB_NAME}"
 echo "==> DB_USER.........: ${DB_USER}"
 echo "==> FILESTORE_IN_APP: ${FILESTORE_IN_APP}"
 echo "==> OUT.............: ${OUT}"
+#mkdir -p "${TMP}" "${BACKUP_ROOT}"
+#echo "==> ENV.............: ${ENV}"
+#echo "==> APP_CONT........: ${APP_CONT}"
+#echo "==> DB_CONT.........: ${DB_CONT}"
+#echo "==> DB_NAME.........: ${DB_NAME}"
+#echo "==> DB_USER.........: ${DB_USER}"
+#echo "==> FILESTORE_IN_APP: ${FILESTORE_IN_APP}"
+#echo "==> OUT.............: ${OUT}"
 
 # ---- Preflight: verify containers & filestore path ----
 set +e

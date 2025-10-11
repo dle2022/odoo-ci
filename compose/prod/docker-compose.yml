@@ -1,43 +1,51 @@
-version: "3.9"
+# /srv/odoo/ci/compose/prod/docker-compose.yml
 services:
   db:
     image: postgres:15
     container_name: odoo-prod-db
+
+    # Read POSTGRES_USER / POSTGRES_PASSWORD (and others) from .env.prod
+    env_file:
+      - ../../.env.prod
+
     environment:
-      POSTGRES_DB: postgres
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # You can keep only what you want to override here
+      POSTGRES_DB: odoo_prod
+
     volumes:
       - prod_db_data:/var/lib/postgresql/data
+
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      test: ["CMD-SHELL", "pg_isready -d ${POSTGRES_DB:-odoo_prod} -U ${POSTGRES_USER:-odoo}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   odoo:
-    image: odoo:${ODOO_VERSION}
-    # build:
-    #   context: ../../odoo
-    #   dockerfile: Dockerfile
+    image: odoo:18
     container_name: odoo-prod-app
     depends_on:
       db:
         condition: service_healthy
+
+    # Odoo already used the env file; keep it
     env_file:
       - ../../.env.prod
+
     environment:
       HOST: db
       USER: ${POSTGRES_USER}
       PASSWORD: ${POSTGRES_PASSWORD}
       WORKERS: ${WORKERS}
+
     volumes:
+      - prod_odoo_data:/var/lib/odoo
       - ../../odoo/addons:/mnt/extra-addons
       - ../../odoo/config/odoo.prod.conf:/etc/odoo/odoo.conf:ro
-      - prod_odoo_data:/var/lib/odoo
+      - /srv/odoo/enterprise/18.0:/mnt/enterprise:ro   # <— add-
     ports:
       - "8070:8069"
 
 volumes:
-  prod_db_data:
-  prod_odoo_data:
+  prod_db_data: {}
+  prod_odoo_data: {}

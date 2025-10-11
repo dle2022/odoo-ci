@@ -1,0 +1,429 @@
+name: Restore Production (from backup)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Where to run the restore"
+        type: choice
+        options: [same_host, new_host]
+        default: same_host
+      date_key:
+        description: "Backup date key (e.g., 20251006 or 2025-10-06 or partial)"
+        required: true
+      transfer:
+        description: "Transfer method (for new_host)"
+        type: choice
+        options: [artifact]
+        default: artifact
+
+permissions:
+  contents: read
+
+# ---------- When restoring on a NEW HOST, first pick the tar on the old prod runner ----------
+jobs:
+  select_backup_on_prod:
+    if: ${{ inputs.mode == 'new_host' }}
+    name: Select backup on old prod host
+    runs-on: [self-hosted, production]
+    environment: production
+    outputs:
+      picked: ${{ steps.pick.outputs.path }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rehydrate prod env
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
+          sed -i 's/\r$//' .env.prod || true
+
+      - name: Pick backup by date
+        id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .env.prod
+          BACKUP_ROOT="${BACKUP_ROOT:-$HOME/backups}"
+          KEY="${{ inputs.date_key }}"
+          FLAT="$(echo "$KEY" | tr -d '-')"
+          NAME="${DB_NAME:-${POSTGRES_DB:-odoo_prod}}"
+
+          P=$(ls -1t "${BACKUP_ROOT}/prod_odoo_${NAME}_"*".tar.gz" 2>/dev/null | grep -m1 -E "${FLAT}|${KEY}" || true)
+          [[ -n "$P" && -f "$P" ]] || { echo "No backup matching date key: $KEY"; exit 1; }
+
+          # validate contents; accept db.sql(.gz) OR db.dump; avoid pipefail-on-SIGPIPE
+          set +o pipefail
+          if tar -tzf "$P" 2>/dev/null | grep -qE '(^|/)(db\.sql(\.gz)?|db\.dump)$'; then
+            :
+          else
+            echo "Backup missing db.sql(.gz) or db.dump: $P"
+            exit 2
+          fi
+          set -o pipefail
+
+          echo "path=$P" >> "$GITHUB_OUTPUT"
+          echo "Selected: $P"
+
+      - name: Upload backup (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.run_id }}-prod-restore
+          path: ${{ steps.pick.outputs.path }}
+
+  # ---------- Restore on SAME HOST (local path) ----------
+  restore_prod_same_host:
+    if: ${{ inputs.mode == 'same_host' }}
+    name: Restore on same host (local)
+    runs-on: [self-hosted, production]
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rehydrate prod env
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
+          sed -i 's/\r$//' .env.prod || true
+
+      - name: Find local backup by date
+        id: set_local
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .env.prod
+          BACKUP_ROOT="${BACKUP_ROOT:-$HOME/backups}"
+          KEY="${{ inputs.date_key }}"
+          FLAT="$(echo "$KEY" | tr -d '-')"
+          NAME="${DB_NAME:-${POSTGRES_DB:-odoo_prod}}"
+
+          P=$(ls -1t "${BACKUP_ROOT}/prod_odoo_${NAME}_"*".tar.gz" 2>/dev/null | grep -m1 -E "${FLAT}|${KEY}" || true)
+          [[ -n "$P" && -f "$P" ]] || { echo "No local backup matching date key: $KEY"; exit 1; }
+
+          # validate contents; accept db.sql(.gz) OR db.dump; avoid pipefail-on-SIGPIPE
+          set +o pipefail
+          if tar -tzf "$P" 2>/dev/null | grep -qE '(^|/)(db\.sql(\.gz)?|db\.dump)$'; then
+            :
+          else
+            echo "Backup missing db.sql(.gz) or db.dump: $P"
+            exit 2
+          fi
+          set -o pipefail
+
+          echo "path=$P" >> "$GITHUB_OUTPUT"
+          echo "Using local: $P"
+
+      - name: Extract backup & verify (verbose)
+        id: extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARBALL="${{ steps.set_local.outputs.path }}"
+          [[ -n "$TARBALL" && -f "$TARBALL" ]] || { echo "Tarball not found"; exit 4; }
+          echo "==> Using backup: $TARBALL"
+
+          WORK="$(mktemp -d /tmp/prod-restore.XXXXXX)"
+          echo "Work dir: $WORK"
+          echo "workdir=$WORK" >> "$GITHUB_OUTPUT"
+
+          echo "==> Extracting to $WORK (verbose):"
+          tar -xzvf "$TARBALL" -C "$WORK"
+
+          echo "==> Listing extracted files:"
+          ls -lah "$WORK"
+
+          # Find a DB payload we support: db.sql.gz, db.sql, or db.dump
+          DB_FILE=""
+          if [[ -f "$WORK/db.sql.gz" ]]; then DB_FILE="$WORK/db.sql.gz"
+          elif [[ -f "$WORK/db.sql" ]]; then DB_FILE="$WORK/db.sql"
+          elif [[ -f "$WORK/db.dump" ]]; then DB_FILE="$WORK/db.dump"
+          fi
+
+          [[ -n "$DB_FILE" ]] || { echo "Selected tarball does not contain db.sql(.gz) or db.dump"; exit 6; }
+          echo "DB file: $DB_FILE"
+          echo "db_file=$DB_FILE" >> "$GITHUB_OUTPUT"
+
+          if [[ -f "$WORK/filestore.tgz" ]]; then
+            echo "Found filestore: $WORK/filestore.tgz"
+            echo "filestore=$WORK/filestore.tgz" >> "$GITHUB_OUTPUT"
+          else
+            echo "No filestore.tgz present in bundle (DB-only restore)"
+            echo "filestore=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore Production (apply SQL & filestore)
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .env.prod
+
+          DB_CONT="${DB_CONT:-odoo-prod-db}"
+          APP_CONT="${APP_CONT:-odoo-prod-app}"
+          DB_NAME="${DB_NAME:-${POSTGRES_DB:-odoo_prod}}"
+          DB_USER="${DB_USER:-${POSTGRES_USER:-odoo}}"
+          PGPASSWORD="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
+          FILESTORE_IN_APP="${FILESTORE_IN_APP:-/var/lib/odoo/.local/share/Odoo/filestore/${DB_NAME}}"
+
+          DB_FILE="${{ steps.extract.outputs.db_file }}"
+          FILESTORE="${{ steps.extract.outputs.filestore }}"
+          WORKDIR="${{ steps.extract.outputs.workdir }}"
+
+          echo "==> Target DB container : $DB_CONT"
+          echo "==> Target APP container: $APP_CONT"
+          echo "==> Database name       : $DB_NAME"
+          echo "==> DB file             : $DB_FILE"
+          echo "==> Filestore           : ${FILESTORE:-<none>}"
+          echo "==> Work dir            : $WORKDIR"
+
+          # Stop app to avoid locks
+          docker stop "$APP_CONT" >/dev/null || true
+
+          # Pass PGPASSWORD to psql/pg_restore if we have one
+          if [[ -n "$PGPASSWORD" ]]; then EXP=(-e PGPASSWORD="$PGPASSWORD"); else EXP=(); fi
+
+          echo "==> Recreating database and extensions …"
+          docker exec "${EXP[@]}" -i "$DB_CONT" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 \
+            -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}';" || true
+          docker exec "${EXP[@]}" -i "$DB_CONT" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 \
+            -c "DROP DATABASE IF EXISTS \"${DB_NAME}\";"
+          docker exec "${EXP[@]}" -i "$DB_CONT" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE \"${DB_NAME}\" OWNER \"${DB_USER}\" TEMPLATE template0 ENCODING 'UTF8';"
+          docker exec "${EXP[@]}" -i "$DB_CONT" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+            -c "CREATE EXTENSION IF NOT EXISTS unaccent;"
+          docker exec "${EXP[@]}" -i "$DB_CONT" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+            -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+
+          case "$DB_FILE" in
+            *.sql.gz)
+              echo "==> Loading gzipped SQL …"
+              docker cp "$DB_FILE" "$DB_CONT:/tmp/db.sql.gz"
+              docker exec "${EXP[@]}" -i "$DB_CONT" bash -lc \
+                'gunzip -c /tmp/db.sql.gz | psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "'"$DB_NAME"'" && rm -f /tmp/db.sql.gz'
+              ;;
+            *.sql)
+              echo "==> Loading plain SQL …"
+              docker cp "$DB_FILE" "$DB_CONT:/tmp/db.sql"
+              docker exec "${EXP[@]}" -i "$DB_CONT" bash -lc \
+                'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "'"$DB_NAME"'" -f /tmp/db.sql && rm -f /tmp/db.sql'
+              ;;
+            *.dump)
+              echo "==> Loading pg_dump custom format …"
+              docker cp "$DB_FILE" "$DB_CONT:/tmp/db.dump"
+              docker exec "${EXP[@]}" -i "$DB_CONT" bash -lc \
+                'pg_restore --clean --if-exists --no-owner --no-privileges -U "$POSTGRES_USER" -d "'"$DB_NAME"'" /tmp/db.dump && rm -f /tmp/db.dump'
+              ;;
+          esac
+
+          # --- after the DB restore case-switch, before disabling mail ---
+          # --- after the DB restore case-switch, before disabling mail ---
+
+          # Ensure the app container is running before we use `docker exec`
+          ensure_app_running() {
+            local c="$1"
+            local i
+            if [[ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null || echo false)" != "true" ]]; then
+              echo "==> App container '$c' is stopped; starting it ..."
+              docker start "$c" >/dev/null || {
+                echo "ERROR: failed to start $c"; exit 90;
+              }
+              # wait a few seconds for it to be fully running
+              for i in {1..15}; do
+                if [[ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null || echo false)" == "true" ]]; then
+                  break
+                fi
+                sleep 1
+              done
+            fi
+          }
+
+          if [[ -n "$FILESTORE" ]]; then
+            echo "==> Restoring filestore to $FILESTORE_IN_APP …"
+
+            # ensure app is running so docker exec works reliably
+            if [[ "$(docker inspect -f '{{.State.Running}}' "$APP_CONT" 2>/dev/null || echo false)" != "true" ]]; then
+              echo "==> App container '$APP_CONT' is stopped; starting it …"
+              docker start "$APP_CONT" >/dev/null
+              # tiny wait to avoid race
+              for i in {1..10}; do
+                [[ "$(docker inspect -f '{{.State.Running}}' "$APP_CONT" 2>/dev/null || echo false)" == "true" ]] && break
+                sleep 1
+              done
+            fi
+
+            # prepare target path and unpack as root inside the container
+            docker exec -u 0 -i "$APP_CONT" bash -lc "
+              set -euo pipefail
+              mkdir -p '$FILESTORE_IN_APP'
+              rm -rf '$FILESTORE_IN_APP'/* || true
+            "
+
+            docker cp "$FILESTORE" "$APP_CONT:/tmp/filestore.tgz"
+
+            docker exec -u 0 -i "$APP_CONT" bash -lc "
+              set -euo pipefail
+              tar -xzf /tmp/filestore.tgz -C '$FILESTORE_IN_APP'
+              chown -R odoo:odoo '$FILESTORE_IN_APP'
+              rm -f /tmp/filestore.tgz || true
+            "
+          else
+            echo "No filestore.tgz present (DB-only restore)."
+          fi
+
+
+          echo "==> Disabling outgoing email …"
+          docker exec "${EXP[@]}" -i "$DB_CONT" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+            -c "UPDATE ir_mail_server SET active=false;" || true
+
+          docker start "$APP_CONT" >/dev/null
+          echo "[✓] Production restore completed."
+
+
+  # ---------- Restore on NEW HOST (artifact) ----------
+  restore_prod_new_host:
+    if: ${{ inputs.mode == 'new_host' }}
+    name: Restore on new host (artifact)
+    needs: [select_backup_on_prod]
+    runs-on: [self-hosted, recovery]   # label your DR runner "recovery" (or change label)
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rehydrate prod env
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
+          sed -i 's/\r$//' .env.prod || true
+
+      - name: Download selected artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.run_id }}-prod-restore
+          path: ${{ runner.temp }}/restore
+
+      - name: Set restore path
+        id: set_art
+        shell: bash
+        run: |
+          set -euo pipefail
+          P=$(ls -1 "${{ runner.temp }}/restore/"*.tar.gz | head -1 || true)
+          [[ -n "$P" && -f "$P" ]] || { echo "Artifact tar.gz not found"; exit 2; }
+          echo "path=$P" >> "$GITHUB_OUTPUT"
+          echo "Using artifact: $P"
+
+      - name: Extract backup & verify (verbose)
+        id: extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARBALL="${{ steps.set_art.outputs.path }}"
+          [[ -n "$TARBALL" && -f "$TARBALL" ]] || { echo "Tarball not found"; exit 4; }
+          echo "==> Using backup: $TARBALL"
+
+          WORK="$(mktemp -d /tmp/prod-restore.XXXXXX)"
+          echo "Work dir: $WORK"
+          echo "workdir=$WORK" >> "$GITHUB_OUTPUT"
+
+          echo "==> Extracting to $WORK (verbose):"
+          tar -xzvf "$TARBALL" -C "$WORK"
+
+          echo "==> Listing extracted files:"
+          ls -lah "$WORK"
+
+          DB_FILE=""
+          if [[ -f "$WORK/db.sql.gz" ]]; then DB_FILE="$WORK/db.sql.gz"
+          elif [[ -f "$WORK/db.sql" ]]; then DB_FILE="$WORK/db.sql"
+          elif [[ -f "$WORK/db.dump" ]]; then DB_FILE="$WORK/db.dump"
+          fi
+          [[ -n "$DB_FILE" ]] || { echo "Selected tarball does not contain db.sql(.gz) or db.dump"; exit 6; }
+          echo "DB file: $DB_FILE"
+          echo "db_file=$DB_FILE" >> "$GITHUB_OUTPUT"
+
+          if [[ -f "$WORK/filestore.tgz" ]]; then
+            echo "Found filestore: $WORK/filestore.tgz"
+            echo "filestore=$WORK/filestore.tgz" >> "$GITHUB_OUTPUT"
+          else
+            echo "No filestore.tgz present in bundle (DB-only restore)"
+            echo "filestore=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore Production (apply SQL & filestore)
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .env.prod
+
+          DB_CONT="${DB_CONT:-odoo-prod-db}"
+          APP_CONT="${APP_CONT:-odoo-prod-app}"
+          DB_NAME="${DB_NAME:-${POSTGRES_DB:-odoo_prod}}"
+          DB_USER="${DB_USER:-${POSTGRES_USER:-odoo}}"
+          PGPASSWORD="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
+          FILESTORE_IN_APP="${FILESTORE_IN_APP:-/var/lib/odoo/.local/share/Odoo/filestore/${DB_NAME}}"
+
+          DB_FILE="${{ steps.extract.outputs.db_file }}"
+          FILESTORE="${{ steps.extract.outputs.filestore }}"
+          WORKDIR="${{ steps.extract.outputs.workdir }}"
+
+          echo "==> Target DB container : $DB_CONT"
+          echo "==> Target APP container: $APP_CONT"
+          echo "==> Database name       : $DB_NAME"
+          echo "==> DB file             : $DB_FILE"
+          echo "==> Filestore           : ${FILESTORE:-<none>}"
+          echo "==> Work dir            : $WORKDIR"
+
+          docker stop "$APP_CONT" >/dev/null || true
+          if [[ -n "$PGPASSWORD" ]]; then EXP=(-e PGPASSWORD="$PGPASSWORD"); else EXP=(); fi
+
+          docker exec "${EXP[@]}" -i "$DB_CONT" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 \
+            -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME}';" || true
+          docker exec "${EXP[@]}" -i "$DB_CONT" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 \
+            -c "DROP DATABASE IF EXISTS \"${DB_NAME}\";"
+          docker exec "${EXP[@]}" -i "$DB_CONT" psql -U "$DB_USER" -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE \"${DB_NAME}\" OWNER \"${DB_USER}\" TEMPLATE template0 ENCODING 'UTF8';"
+          docker exec "${EXP[@]}" -i "$DB_CONT" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+            -c "CREATE EXTENSION IF NOT EXISTS unaccent;"
+          docker exec "${EXP[@]}" -i "$DB_CONT" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+            -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+
+          case "$DB_FILE" in
+            *.sql.gz)
+              echo "==> Loading gzipped SQL …"
+              docker cp "$DB_FILE" "$DB_CONT:/tmp/db.sql.gz"
+              docker exec "${EXP[@]}" -i "$DB_CONT" bash -lc \
+                'gunzip -c /tmp/db.sql.gz | psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "'"$DB_NAME"'" && rm -f /tmp/db.sql.gz'
+              ;;
+            *.sql)
+              echo "==> Loading plain SQL …"
+              docker cp "$DB_FILE" "$DB_CONT:/tmp/db.sql"
+              docker exec "${EXP[@]}" -i "$DB_CONT" bash -lc \
+                'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "'"$DB_NAME"'" -f /tmp/db.sql && rm -f /tmp/db.sql'
+              ;;
+            *.dump)
+              echo "==> Loading pg_dump custom format …"
+              docker cp "$DB_FILE" "$DB_CONT:/tmp/db.dump"
+              docker exec "${EXP[@]}" -i "$DB_CONT" bash -lc \
+                'pg_restore --clean --if-exists --no-owner --no-privileges -U "$POSTGRES_USER" -d "'"$DB_NAME"'" /tmp/db.dump && rm -f /tmp/db.dump'
+              ;;
+          esac
+
+          if [[ -n "$FILESTORE" ]]; then
+            echo "==> Restoring filestore to $FILESTORE_IN_APP …"
+            docker cp "$FILESTORE" "$APP_CONT:/tmp/filestore.tgz"
+            docker exec -i "$APP_CONT" bash -lc "mkdir -p '$FILESTORE_IN_APP' && rm -rf '$FILESTORE_IN_APP'/* || true"
+            docker exec -i "$APP_CONT" bash -lc "tar -xzf /tmp/filestore.tgz -C '$FILESTORE_IN_APP' && chown -R odoo:odoo '$FILESTORE_IN_APP' && rm -f /tmp/filestore.tgz"
+          else
+            echo "==> No filestore.tgz; skipping filestore restore"
+          fi
+
+          echo "==> Disabling outgoing email …"
+          docker exec "${EXP[@]}" -i "$DB_CONT" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+            -c "UPDATE ir_mail_server SET active=false;" || true
+
+          docker start "$APP_CONT" >/dev/null
+          echo "[✓] Production restore completed."
+

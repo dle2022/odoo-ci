@@ -9,7 +9,7 @@ on:
         options: [staging, production]
         default: production
   schedule:
-    - cron: "0 9 * * *"   # 09:00 UTC daily (prod)
+    - cron: "0 6 * * *"   # 06:00 PDT daily (prod)
 
 jobs:
   backup:
@@ -23,22 +23,55 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve target
+        run: |
+          echo "TARGET=${{ inputs.target || 'prod' }}" >> "$GITHUB_ENV"
+      - name: Rehydrate .env.staging
+        if: env.TARGET == 'staging'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.ENV_STAGING_B64 }}" | base64 -d > .env.staging
+          # hard fail if empty / missing secret
+          test -s .env.staging || { echo "ENV_STAGING_B64 is missing/empty"; exit 1; }
+          ls -la .env.staging
+      - name: Rehydrate .env.prod
+        if: env.TARGET != 'staging'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
+          test -s .env.prod || { echo "ENV_PROD_B64 is missing/empty"; exit 1; }
+          ls -la .env.prod
 
       # Rehydrate the correct .env file into the job workspace.
       # (scripts/backup_docker.sh reads .env.staging or .env.prod from repo root)
-      - name: Rehydrate env file
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.target }}" == "staging" ]]; then
-            echo "${{ secrets.ENV_STAGING_B64 }}" | base64 -d > .env.staging
-          else
-            echo "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
-          fi
-          ls -la .env.*  # debug; safe to remove later
+#      - name: Rehydrate env file
+ #       run: |
+  #        if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.target }}" == "staging" ]]; then
+   #         echo "${{ secrets.ENV_STAGING_B64 }}" | base64 -d > .env.staging
+    #      else
+     #       echo "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
+      #    fi
+       #   ls -la .env.*  # debug; safe to remove later
+
+
 
       - name: Preflight (containers & filestore path)
         run: |
           set -euxo pipefail
-          source .env.prod
+          # pick the right env file (same logic as below step)
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.target }}" == "staging" ]]; then
+            ENV_FILE=".env.staging"
+          else
+            ENV_FILE=".env.prod"
+          fi
+          test -s "$ENV_FILE"
+          source "$ENV_FILE"
+
+          # (optional safety: derive DB_NAME if not set)
+          : "${DB_NAME:=${POSTGRES_DB:-odoo_prod}}"
+          #source .env.prod
           echo "APP_CONT=$APP_CONT"
           echo "DB_CONT=$DB_CONT"
           echo "DB_NAME=$DB_NAME"

@@ -1,16 +1,13 @@
 name: Deploy Odoo (Prod & Staging)
 
+
 on:
-  push:
-    branches: ["staging", "main"]
   workflow_dispatch:
     inputs:
-      target:
-        description: "Deploy target"
+      env:
         type: choice
         options: [staging, production]
-        default: staging
-
+        default: production
 jobs:
   deploy-staging:
     name: Deploy Staging
@@ -25,10 +22,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - name: Rehydrate .env.staging
+        shell: bash
         run: |
-          echo "${{ secrets.ENV_STAGING_B64 }}" | base64 -d > .env.staging
+          set -euo pipefail
+          SECRET="${{ secrets.ENV_STAGING_B64 }}"
+          [[ -n "$SECRET" ]] || { echo "ENV_STAGING_B64 is missing"; exit 1; }
+          # Try base64; if it fails, write raw
+          if printf '%s' "$SECRET" | base64 -d > .env.staging 2>/dev/null; then
+            :
+          else
+            printf '%s' "$SECRET" > .env.staging
+          fi
           chmod 600 .env.staging
           ls -la .env.*  # debug
 
@@ -36,7 +41,6 @@ jobs:
         run: |
           chmod +x scripts/deploy.sh
           ./scripts/deploy.sh staging
-
   deploy-prod:
     name: Deploy Production
     # Run when:
@@ -52,8 +56,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Rehydrate .env.prod
+        shell: bash
         run: |
-          echo "${{ secrets.ENV_PROD_B64 }}" | base64 -d > .env.prod
+          set -euo pipefail
+          SECRET="${{ secrets.ENV_PROD_B64 }}"
+          [[ -n "$SECRET" ]] || { echo "ENV_PROD_B64 is missing"; exit 1; }
+          # Try base64; if it fails, write raw
+          if printf '%s' "$SECRET" | base64 -d > .env.prod 2>/dev/null; then
+            :
+          else
+            printf '%s' "$SECRET" > .env.prod
+          fi
           chmod 600 .env.prod
           ls -la .env.*  # debug
 

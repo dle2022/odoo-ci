@@ -33,13 +33,13 @@ echo "DBG: using ENV_FILE=$ENV_FILE"
 echo "DBG: POSTGRES_USER='${POSTGRES_USER:-<unset>}' DB_USER(before)='${DB_USER:-<unset>}' DB_NAME='${DB_NAME:-<unset>}'"
 
 # ---------- Normalization / defaults ----------
-# IMPORTANT: fix default to $HOME/backups (your runner's home), not $HOME/github-runner/backups
+# IMPORTANT: default to $HOME/backups (runner's home)
 BACKUP_ROOT="${BACKUP_ROOT:-$HOME/backups}"
 DB_PORT="${DB_PORT:-5432}"
 APP_CONT="${APP_CONT:-odoo-${ENV}-app}"
 DB_CONT="${DB_CONT:-odoo-${ENV}-db}"
 
-# DB role/password: prefer explicit DB_USER/PGPASSWORD; else POSTGRES_*; else sensible 'odoo' default
+# DB role/password: prefer explicit DB_USER/PGPASSWORD; else POSTGRES_*; else 'odoo'
 DB_USER="${DB_USER:-${POSTGRES_USER:-odoo}}"
 PGPASSWORD="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
 
@@ -124,28 +124,29 @@ else
   echo "WARN: Filestore path not found in container: ${FILESTORE_IN_APP}" >&2
 fi
 
-# ---------- DB DUMP ----------
-echo "==> Dumping DB from ${DB_CONT}"
+# ---------- DB BACKUP (PLAIN SQL, GZIPPED) ----------
+echo "==> Dumping DB (plain SQL, gzipped) from ${DB_CONT}"
 DB_TMP_DIR="/var/lib/postgresql/tmp-backup"
 docker exec "${DB_CONT}" bash -lc "rm -rf '${DB_TMP_DIR}'; mkdir -p '${DB_TMP_DIR}' && chmod 700 '${DB_TMP_DIR}'"
 
+# Create /tmp/db.sql.gz inside DB container, then copy it out
 if [[ -n "$PGPASSWORD" ]]; then
   docker exec -e PGPASSWORD="${PGPASSWORD}" \
-    "${DB_CONT}" bash -lc "pg_dump -U '${DB_USER}' -d '${DB_NAME}' -F c -f '${DB_TMP_DIR}/db.dump'"
+    "${DB_CONT}" bash -lc "pg_dump -Fp -U '${DB_USER}' -d '${DB_NAME}' | gzip -c > '${DB_TMP_DIR}/db.sql.gz'"
 else
   docker exec \
-    "${DB_CONT}" bash -lc "pg_dump -U '${DB_USER}' -d '${DB_NAME}' -F c -f '${DB_TMP_DIR}/db.dump'"
+    "${DB_CONT}" bash -lc "pg_dump -Fp -U '${DB_USER}' -d '${DB_NAME}' | gzip -c > '${DB_TMP_DIR}/db.sql.gz'"
 fi
 
-docker cp "${DB_CONT}:${DB_TMP_DIR}/db.dump" "${TMP}/db.dump"
+docker cp "${DB_CONT}:${DB_TMP_DIR}/db.sql.gz" "${TMP}/db.sql.gz"
 docker exec "${DB_CONT}" bash -lc "rm -rf '${DB_TMP_DIR}'"
 
-if [[ ! -s "${TMP}/db.dump" ]]; then
-  echo "ERROR: db.dump is missing or empty after pg_dump + docker cp." >&2
+if [[ ! -s "${TMP}/db.sql.gz" ]]; then
+  echo "ERROR: db.sql.gz is missing or empty after pg_dump + docker cp." >&2
   ls -l "${TMP}" || true
   exit 5
 fi
-echo "==> DB dump size: $(du -h "${TMP}/db.dump" | awk '{print $1}')"
+echo "==> DB SQL size: $(du -h "${TMP}/db.sql.gz" | awk '{print $1}')"
 
 # ---------- FILESTORE ----------
 echo "==> Copying filestore"
@@ -171,10 +172,11 @@ db_container=${DB_CONT}
 filestore=${FILESTORE_IN_APP}
 EOF
 
+# NOTE: package db.sql.gz (not db.dump)
 if [[ -f "${TMP}/filestore.tgz" ]]; then
-  tar -C "${TMP}" -czf "${OUT}" db.dump filestore.tgz manifest.txt
+  tar -C "${TMP}" -czf "${OUT}" db.sql.gz filestore.tgz manifest.txt
 else
-  tar -C "${TMP}" -czf "${OUT}" db.dump manifest.txt
+  tar -C "${TMP}" -czf "${OUT}" db.sql.gz manifest.txt
 fi
 sha256sum "${OUT}" > "${OUT}.sha256"
 

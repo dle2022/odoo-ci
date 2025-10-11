@@ -1,30 +1,38 @@
-version: "3.9"
 services:
   db:
     image: postgres:15
     container_name: odoo-staging-db
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: "odoo_staging"
-      POSTGRES_USER: "${POSTGRES_USER}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
-    volumes:
-      - odoo_staging_pgdata:/var/lib/postgresql/data
-
-  odoo:
-    image: odoo:16
-    container_name: odoo-staging
-    depends_on:
-      - db
-    restart: unless-stopped
     env_file:
       - ../../.env.staging
+    environment:
+      POSTGRES_DB: odoo_staging
+      POSTGRES_USER: ${POSTGRES_USER:-odoo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-your_strong_password}
     volumes:
-      - ../../odoo/config/odoo.staging.conf:/etc/odoo/odoo.conf:ro
-      - odoo_staging_data:/var/lib/odoo
-    ports:
-      - "8069:8069"
+      - staging_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d odoo_staging -U odoo"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
+  odoo:
+    image: odoo:18
+    container_name: odoo-staging-app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ""          # <- ensure nothing overrides db_password
+    volumes:
+      - staging_odoo_data:/var/lib/odoo
+      - ../../odoo/addons:/mnt/extra-addons
+      - ../../odoo/config/odoo.staging.conf:/etc/odoo/odoo.conf:ro
+      # disable enterprise until we’re up; we’ll re-enable later
+      # - /srv/odoo/enterprise/18.0:/mnt/enterprise:ro
+    ports:
+      - "8071:8069"
+    command: ["bash","-lc","unset PGPASSWORD; exec odoo -c /etc/odoo/odoo.conf"]
 volumes:
-  odoo_staging_pgdata:
-  odoo_staging_data:
+  staging_db_data: {}
+  staging_odoo_data: {}

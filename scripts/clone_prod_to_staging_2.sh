@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Clone Production Odoo to Staging using an existing prod backup tarball.
-# Works with backups created by scripts/backup_docker.sh (db.dump + filestore.tgz).
+# Clone Production Odoo to Staging using an existing prod SQL backup tarball.
+# Expected backup contents (at archive root):
+#   - db.sql.gz   (preferred)  OR  db.sql
+#   - filestore.tgz  (optional but recommended)
+#   - manifest.txt   (optional)
 #
 # Usage:
-#   ./scripts/clone_prod_to_staging.sh [--from /path/to/prod_backup.tar.gz] [--from-latest] \
+#   ./scripts/clone_prod_to_staging_2.sh [--from /path/to/prod_backup.tar.gz] [--from-latest] \
 #       [--prod-env .env.backup.prod|.env.prod] [--stage-env .env.backup.staging|.env.staging]
 #
 # If neither --from nor --from-latest is given, the script defaults to --from-latest.
@@ -38,7 +41,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      sed -n '1,60p' "$0"
+      sed -n '1,200p' "$0"
       exit 0
       ;;
     *)
@@ -47,12 +50,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-#------------- env detection (mirror backup_docker.sh behavior) -------------
-# Prefer split backup envs if present; otherwise fall back to non-split .env files.
+#------------- env detection (mirror existing behavior) -------------
 PROD_ENV_FILE="${PROD_ENV_FILE:-$([[ -f "${PROJECT_DIR}/.env.backup.prod" ]] && echo "${PROJECT_DIR}/.env.backup.prod" || echo "${PROJECT_DIR}/.env.prod")}"
 STAGE_ENV_FILE="${STAGE_ENV_FILE:-$([[ -f "${PROJECT_DIR}/.env.backup.staging" ]] && echo "${PROJECT_DIR}/.env.backup.staging" || echo "${PROJECT_DIR}/.env.staging")}"
 
-[[ -f "$PROD_ENV_FILE" ]]  || { echo "Missing $PROD_ENV_FILE"; exit 2; }
+[[ -f "$PROD_ENV_FILE"  ]] || { echo "Missing $PROD_ENV_FILE";  exit 2; }
 [[ -f "$STAGE_ENV_FILE" ]] || { echo "Missing $STAGE_ENV_FILE"; exit 2; }
 
 # Load PROD env (for BACKUP_ROOT and prod DB name)
@@ -61,8 +63,6 @@ BACKUP_ROOT="${BACKUP_ROOT:-/home/github-runner/backups}"
 DB_USER_PROD="${DB_USER:-${POSTGRES_USER:-odoo}}"
 PGPASSWORD_PROD="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
 DB_NAME_PROD="${DB_NAME:-}"
-# We may not strictly need PROD creds since we restore from tarball, but we read prod DB name
-# to pattern-match the latest backup file if needed.
 
 # Load STAGING env (for target containers/paths/creds)
 set -a; source "$STAGE_ENV_FILE"; set +a
@@ -73,10 +73,8 @@ FILESTORE_IN_APP_STAGE="${FILESTORE_IN_APP:-/var/lib/odoo/.local/share/Odoo/file
 
 #------------- choose backup tarball -------------
 if $USE_LATEST && [[ -z "$BACKUP_PATH" ]]; then
-  # Find the latest prod backup tar produced by backup_docker.sh
-  # Pattern: ${ENV}_odoo_${DB_NAME}_${YYYYMMDD_HHMMSS}.tar.gz  (ENV is 'prod' for production)
+  # Pattern is unchanged; pick newest prod tar.gz
   if [[ -z "${DB_NAME_PROD}" ]]; then
-    # Fall back: glob any prod tar.gz and sort by mtime
     CANDIDATE=$(ls -1t "${BACKUP_ROOT}/prod_odoo_"*.tar.gz 2>/dev/null | head -1 || true)
   else
     CANDIDATE=$(ls -1t "${BACKUP_ROOT}/prod_odoo_${DB_NAME_PROD}_"*.tar.gz 2>/dev/null | head -1 || true)
@@ -86,30 +84,25 @@ if $USE_LATEST && [[ -z "$BACKUP_PATH" ]]; then
 fi
 
 [[ -f "$BACKUP_PATH" ]] || { echo "Backup tar not found: $BACKUP_PATH"; exit 4; }
-
 echo "==> Using backup: $BACKUP_PATH"
 
 # Optional checksum verification
 if [[ -f "${BACKUP_PATH}.sha256" ]]; then
   echo "==> Verifying checksum ..."
-  # Busybox 'sha256sum -c' expects 'filename' not path; handle correctly:
-  # Create a temp copy with matching name to avoid false-negative
   TMP_DIR_CHECK="$(mktemp -d)"
   trap 'rm -rf "$TMP_DIR_CHECK" || true' EXIT
   cp "$BACKUP_PATH" "$TMP_DIR_CHECK/"
   BASENAME_BACKUP="$(basename "$BACKUP_PATH")"
-  # Create a temp .sha256 file with corrected filename
   awk -v f="$BASENAME_BACKUP" '{print $1"  "f}' "${BACKUP_PATH}.sha256" > "${TMP_DIR_CHECK}/${BASENAME_BACKUP}.sha256"
   (cd "$TMP_DIR_CHECK" && sha256sum -c "${BASENAME_BACKUP}.sha256")
   rm -rf "$TMP_DIR_CHECK"
 fi
 
 #------------- locate compose files & containers -------------
-PROD_COMPOSE="${PROJECT_DIR}/compose/prod/docker-compose.yml"
 STAGE_COMPOSE="${PROJECT_DIR}/compose/staging/docker-compose.yml"
 
 # We only need staging containers for restore (db + odoo)
-SDB="$(docker compose -f "${STAGE_COMPOSE}" ps -q db || true)"
+SDB="$(docker compose -f "${STAGE_COMPOSE}" ps -q db   || true)"
 SOD="$(docker compose -f "${STAGE_COMPOSE}" ps -q odoo || true)"
 [[ -n "$SDB" && -n "$SOD" ]] || {
   echo "ERROR: Staging containers not found. Ensure compose/staging/docker-compose.yml is up and 'db' and 'odoo' services are running." >&2
@@ -123,23 +116,30 @@ trap 'rm -rf "$WORK_DIR" || true' EXIT
 echo "==> Extracting backup into temp dir ..."
 tar -C "$WORK_DIR" -xzf "$BACKUP_PATH"
 
-# The backup format (from backup_docker.sh):
-#   db.dump            - pg_dump custom format (-Fc)
-#   filestore.tgz      - tar.gz of filestore (optional)
-#   manifest.txt       - info (env, timestamp, db_name, etc.)
-[[ -f "${WORK_DIR}/db.dump" ]] || { echo "db.dump missing inside backup."; exit 6; }
+# SQL backup format (this script requires SQL, not dump):
+#   db.sql.gz  (preferred)  OR  db.sql
+#   filestore.tgz (optional)
+#   manifest.txt (optional)
+SQL_FILE=""
+if [[ -f "${WORK_DIR}/db.sql.gz" ]]; then
+  SQL_FILE="db.sql.gz"
+elif [[ -f "${WORK_DIR}/db.sql" ]]; then
+  SQL_FILE="db.sql"
+else
+  echo "ERROR: SQL file missing inside backup (expected db.sql.gz or db.sql)." >&2
+  exit 6
+fi
 
 # Read manifest (optional)
 if [[ -f "${WORK_DIR}/manifest.txt" ]]; then
-  echo "==> Manifest:"
-  cat "${WORK_DIR}/manifest.txt" || true
+  echo "==> Manifest:"; cat "${WORK_DIR}/manifest.txt" || true
 fi
 
 #------------- stop staging app to freeze writes -------------
 echo "==> Stopping staging app container ..."
-docker stop "$SOD" >/dev/null
+docker stop "$SOD" >/dev/null || true
 
-#------------- restore database (pg_restore from -Fc) -------------
+#------------- recreate DB and extensions -------------
 echo "==> Recreating STAGING database '${DB_NAME_STAGE}' ..."
 if [[ -n "$PGPASSWORD_STAGE" ]]; then
   docker exec -e PGPASSWORD="${PGPASSWORD_STAGE}" -i "${SDB}" \
@@ -150,34 +150,70 @@ if [[ -n "$PGPASSWORD_STAGE" ]]; then
     -c "DROP DATABASE IF EXISTS \"${DB_NAME_STAGE}\";"
   docker exec -e PGPASSWORD="${PGPASSWORD_STAGE}" -i "${SDB}" \
     psql -U "${DB_USER_STAGE}" -d postgres -v ON_ERROR_STOP=1 \
-    -c "CREATE DATABASE \"${DB_NAME_STAGE}\" OWNER \"${DB_USER_STAGE}\";"
-  # copy & restore
-  docker cp "${WORK_DIR}/db.dump" "${SDB}:/tmp/db.dump"
+    -c "CREATE DATABASE \"${DB_NAME_STAGE}\" OWNER \"${DB_USER_STAGE}\" TEMPLATE template0 ENCODING 'UTF8';"
   docker exec -e PGPASSWORD="${PGPASSWORD_STAGE}" -i "${SDB}" \
-    pg_restore -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -c -O -x /tmp/db.dump
-  docker exec "${SDB}" bash -lc "rm -f /tmp/db.dump"
+    psql -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -v ON_ERROR_STOP=1 \
+    -c "CREATE EXTENSION IF NOT EXISTS unaccent;"
+  docker exec -e PGPASSWORD="${PGPASSWORD_STAGE}" -i "${SDB}" \
+    psql -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -v ON_ERROR_STOP=1 \
+    -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
 else
-  docker exec -i "${SDB}" \
-    psql -U "${DB_USER_STAGE}" -d postgres -v ON_ERROR_STOP=1 \
+  docker exec -i "${SDB}" psql -U "${DB_USER_STAGE}" -d postgres -v ON_ERROR_STOP=1 \
     -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME_STAGE}';" || true
-  docker exec -i "${SDB}" \
-    psql -U "${DB_USER_STAGE}" -d postgres -v ON_ERROR_STOP=1 \
+  docker exec -i "${SDB}" psql -U "${DB_USER_STAGE}" -d postgres -v ON_ERROR_STOP=1 \
     -c "DROP DATABASE IF EXISTS \"${DB_NAME_STAGE}\";"
-  docker exec -i "${SDB}" \
-    psql -U "${DB_USER_STAGE}" -d postgres -v ON_ERROR_STOP=1 \
-    -c "CREATE DATABASE \"${DB_NAME_STAGE}\" OWNER \"${DB_USER_STAGE}\";"
-  docker cp "${WORK_DIR}/db.dump" "${SDB}:/tmp/db.dump"
-  docker exec -i "${SDB}" \
-    pg_restore -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -c -O -x /tmp/db.dump
-  docker exec "${SDB}" bash -lc "rm -f /tmp/db.dump"
+  docker exec -i "${SDB}" psql -U "${DB_USER_STAGE}" -d postgres -v ON_ERROR_STOP=1 \
+    -c "CREATE DATABASE \"${DB_NAME_STAGE}\" OWNER \"${DB_USER_STAGE}\" TEMPLATE template0 ENCODING 'UTF8';"
+  docker exec -i "${SDB}" psql -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -v ON_ERROR_STOP=1 \
+    -c "CREATE EXTENSION IF NOT EXISTS unaccent;"
+  docker exec -i "${SDB}" psql -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -v ON_ERROR_STOP=1 \
+    -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+fi
+
+#------------- restore database from SQL -------------
+echo "==> Restoring SQL (${SQL_FILE}) ..."
+if [[ "$SQL_FILE" == "db.sql.gz" ]]; then
+  docker cp "${WORK_DIR}/db.sql.gz" "${SDB}:/tmp/db.sql.gz"
+  if [[ -n "$PGPASSWORD_STAGE" ]]; then
+    docker exec -e PGPASSWORD="${PGPASSWORD_STAGE}" -i "${SDB}" \
+      bash -lc 'gunzip -c /tmp/db.sql.gz | psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "'"${DB_NAME_STAGE}"'"'
+  else
+    docker exec -i "${SDB}" \
+      bash -lc 'gunzip -c /tmp/db.sql.gz | psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "'"${DB_NAME_STAGE}"'"'
+  fi
+  docker exec "${SDB}" bash -lc "rm -f /tmp/db.sql.gz"
+else
+  docker cp "${WORK_DIR}/db.sql" "${SDB}:/tmp/db.sql"
+  if [[ -n "$PGPASSWORD_STAGE" ]]; then
+    docker exec -e PGPASSWORD="${PGPASSWORD_STAGE}" -i "${SDB}" \
+      psql -v ON_ERROR_STOP=1 -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -f /tmp/db.sql
+  else
+    docker exec -i "${SDB}" \
+      psql -v ON_ERROR_STOP=1 -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -f /tmp/db.sql
+  fi
+  docker exec "${SDB}" bash -lc "rm -f /tmp/db.sql"
 fi
 
 #------------- restore filestore (if present) -------------
+#------------- restore filestore (if present) -------------
 if [[ -f "${WORK_DIR}/filestore.tgz" ]]; then
+  # ensure app container is running before we exec into it
+  if [[ "$(docker inspect -f '{{.State.Running}}' "$SOD" 2>/dev/null || echo false)" != "true" ]]; then
+    echo "   App container is stopped; starting it..."
+    docker start "$SOD" >/dev/null
+  fi
+
   echo "==> Restoring filestore into ${FILESTORE_IN_APP_STAGE}"
+
   docker cp "${WORK_DIR}/filestore.tgz" "${SOD}:/tmp/filestore.tgz"
-  docker exec "${SOD}" bash -lc "mkdir -p '${FILESTORE_IN_APP_STAGE}' && rm -rf '${FILESTORE_IN_APP_STAGE}'/* || true"
-  docker exec "${SOD}" bash -lc "tar -xzf /tmp/filestore.tgz -C '${FILESTORE_IN_APP_STAGE}' && rm -f /tmp/filestore.tgz"
+  docker exec -u 0 "${SOD}" bash -lc "
+    set -euo pipefail
+    mkdir -p '${FILESTORE_IN_APP_STAGE}'
+    rm -rf '${FILESTORE_IN_APP_STAGE}'/* || true
+    tar -xzf /tmp/filestore.tgz -C '${FILESTORE_IN_APP_STAGE}'
+    chown -R odoo:odoo '${FILESTORE_IN_APP_STAGE}'
+    rm -f /tmp/filestore.tgz
+  "
 else
   echo "WARN: filestore.tgz not found in backup; continuing with DB-only restore." >&2
 fi

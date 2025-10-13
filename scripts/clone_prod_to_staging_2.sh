@@ -140,6 +140,7 @@ echo "==> Stopping staging app container ..."
 docker stop "$SOD" >/dev/null || true
 
 #------------- recreate DB and extensions -------------
+#------------- recreate DB -------------
 echo "==> Recreating STAGING database '${DB_NAME_STAGE}' ..."
 if [[ -n "$PGPASSWORD_STAGE" ]]; then
   docker exec -e PGPASSWORD="${PGPASSWORD_STAGE}" -i "${SDB}" \
@@ -151,12 +152,6 @@ if [[ -n "$PGPASSWORD_STAGE" ]]; then
   docker exec -e PGPASSWORD="${PGPASSWORD_STAGE}" -i "${SDB}" \
     psql -U "${DB_USER_STAGE}" -d postgres -v ON_ERROR_STOP=1 \
     -c "CREATE DATABASE \"${DB_NAME_STAGE}\" OWNER \"${DB_USER_STAGE}\" TEMPLATE template0 ENCODING 'UTF8';"
-  docker exec -e PGPASSWORD="${PGPASSWORD_STAGE}" -i "${SDB}" \
-    psql -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -v ON_ERROR_STOP=1 \
-    -c "CREATE EXTENSION IF NOT EXISTS unaccent;"
-  docker exec -e PGPASSWORD="${PGPASSWORD_STAGE}" -i "${SDB}" \
-    psql -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -v ON_ERROR_STOP=1 \
-    -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
 else
   docker exec -i "${SDB}" psql -U "${DB_USER_STAGE}" -d postgres -v ON_ERROR_STOP=1 \
     -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DB_NAME_STAGE}';" || true
@@ -164,13 +159,21 @@ else
     -c "DROP DATABASE IF EXISTS \"${DB_NAME_STAGE}\";"
   docker exec -i "${SDB}" psql -U "${DB_USER_STAGE}" -d postgres -v ON_ERROR_STOP=1 \
     -c "CREATE DATABASE \"${DB_NAME_STAGE}\" OWNER \"${DB_USER_STAGE}\" TEMPLATE template0 ENCODING 'UTF8';"
-  docker exec -i "${SDB}" psql -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -v ON_ERROR_STOP=1 \
-    -c "CREATE EXTENSION IF NOT EXISTS unaccent;"
-  docker exec -i "${SDB}" psql -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -v ON_ERROR_STOP=1 \
-    -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
 fi
 
+
 #------------- restore database from SQL -------------
+# make sure a previous restore didn't leave the extensions around
+if [[ -n "$PGPASSWORD_STAGE" ]]; then
+  docker exec -e PGPASSWORD="${PGPASSWORD_STAGE}" -i "${SDB}" \
+    psql -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -v ON_ERROR_STOP=1 \
+    -c "DROP EXTENSION IF EXISTS unaccent CASCADE; DROP EXTENSION IF EXISTS pg_trgm CASCADE;" || true
+else
+  docker exec -i "${SDB}" \
+    psql -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -v ON_ERROR_STOP=1 \
+    -c "DROP EXTENSION IF EXISTS unaccent CASCADE; DROP EXTENSION IF EXISTS pg_trgm CASCADE;" || true
+fi
+
 echo "==> Restoring SQL (${SQL_FILE}) ..."
 if [[ "$SQL_FILE" == "db.sql.gz" ]]; then
   docker cp "${WORK_DIR}/db.sql.gz" "${SDB}:/tmp/db.sql.gz"
@@ -192,6 +195,18 @@ else
       psql -v ON_ERROR_STOP=1 -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -f /tmp/db.sql
   fi
   docker exec "${SDB}" bash -lc "rm -f /tmp/db.sql"
+fi
+
+
+# ensure required extensions exist (covers very old dumps that might not create them)
+if [[ -n "$PGPASSWORD_STAGE" ]]; then
+  docker exec -e PGPASSWORD="${PGPASSWORD_STAGE}" -i "${SDB}" \
+    psql -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -v ON_ERROR_STOP=1 \
+    -c "CREATE EXTENSION IF NOT EXISTS unaccent; CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+else
+  docker exec -i "${SDB}" \
+    psql -U "${DB_USER_STAGE}" -d "${DB_NAME_STAGE}" -v ON_ERROR_STOP=1 \
+    -c "CREATE EXTENSION IF NOT EXISTS unaccent; CREATE EXTENSION IF NOT EXISTS pg_trgm;"
 fi
 
 #------------- restore filestore (if present) -------------
